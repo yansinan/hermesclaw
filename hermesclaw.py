@@ -555,19 +555,23 @@ def main():
         h_handler = make_proxy_handler(
             hermes_q, base_url, token, state, tag="[Hermes Agent]",
         )
-        h_srv = ThreadingHTTPServer(("127.0.0.1", hermes_port), h_handler)
+        # Allow binding to a configurable host so the Hermes proxy can run in a container
+        h_host = os.environ.get("HERMES_PROXY_HOST", "127.0.0.1")
+        h_srv = ThreadingHTTPServer((h_host, hermes_port), h_handler)
         threading.Thread(target=h_srv.serve_forever, daemon=True).start()
         servers.append(h_srv)
-        log.info("Hermes proxy started on :%d", hermes_port)
+        log.info("Hermes proxy started on %s:%d", h_host, hermes_port)
 
     if oc_on:
         oc_handler = make_proxy_handler(
             oc_q, base_url, token, state, tag="[OpenClaw]",
         )
-        oc_srv = ThreadingHTTPServer(("127.0.0.1", oc_port), oc_handler)
+        # Allow binding to a configurable host so the OpenClaw proxy can run in a container
+        oc_host = os.environ.get("OPENCLAW_PROXY_HOST", "127.0.0.1")
+        oc_srv = ThreadingHTTPServer((oc_host, oc_port), oc_handler)
         threading.Thread(target=oc_srv.serve_forever, daemon=True).start()
         servers.append(oc_srv)
-        log.info("OpenClaw proxy started on :%d", oc_port)
+        log.info("OpenClaw proxy started on %s:%d", oc_host, oc_port)
 
     poll_thread = threading.Thread(
         target=poll_loop,
