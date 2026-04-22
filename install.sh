@@ -6,7 +6,7 @@ set -euo pipefail
 # connect through HermesClaw's dual proxy, and installs the systemd service.
 
 REPO_URL="${HERMESCLAW_REPO_URL:-https://github.com/AaronWong1999/hermesclaw.git}"
-PROJECT_DIR="${HERMESCLAW_DIR:-${HOME}/hermesclaw}"
+PROJECT_DIR="${HERMESCLAW_DIR:-/opt/data/hermesclaw}"
 SERVICE_NAME="hermesclaw"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE="${PROJECT_DIR}/.env"
@@ -241,10 +241,17 @@ EOF
 
 install_python_deps() {
     info "Installing Python dependencies (requests, python-dotenv)."
-    pip3 install --user -q requests python-dotenv 2>/dev/null || \
-    pip3 install --user --break-system-packages -q requests python-dotenv 2>/dev/null || \
-    sudo pip3 install -q requests python-dotenv
-    ok "Python dependencies ready."
+    # Prefer project's .venv pip if available (container-friendly). Otherwise install to user site.
+    if [ -x "${PROJECT_DIR}/.venv/bin/pip" ]; then
+        info "Using project's .venv pip: ${PROJECT_DIR}/.venv/bin/pip"
+        "${PROJECT_DIR}/.venv/bin/pip" install -q requests python-dotenv || warn "venv pip install failed"
+    elif command_exists python3 && python3 -m pip --version >/dev/null 2>&1; then
+        info "Using python3 -m pip --user"
+        python3 -m pip install --user -q requests python-dotenv || warn "pip install --user failed"
+    else
+        warn "No pip available inside the container. Please install dependencies into ${PROJECT_DIR}/.venv or build a new image that includes them.\nSuggested packages: requests, python-dotenv"
+    fi
+    ok "Python dependencies step complete (no system-level package manager was used)."
 }
 
 # ── systemd ───────────────────────────────────────────────────────────────
