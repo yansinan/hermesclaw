@@ -13,6 +13,10 @@ ENV_FILE="${PROJECT_DIR}/.env"
 APP_FILE="${PROJECT_DIR}/hermesclaw.py"
 HERMES_PROXY_PORT="${HERMES_PROXY_PORT:-19998}"
 OPENCLAW_PROXY_PORT="${OPENCLAW_PROXY_PORT:-19999}"
+# In container deployments there is no systemd; default to skipping systemd unless explicitly set to 0
+SKIP_SYSTEMD="${SKIP_SYSTEMD:-1}"
+# AUTO_YES=1 makes the installer non-interactive (default 0 = interactive)
+AUTO_YES="${AUTO_YES:-0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
