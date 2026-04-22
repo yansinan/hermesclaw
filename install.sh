@@ -257,6 +257,12 @@ install_python_deps() {
 # ── systemd ───────────────────────────────────────────────────────────────
 
 install_systemd_service() {
+    # In containerized/testing scenarios we may want to skip creating a systemd unit.
+    if [ "${SKIP_SYSTEMD:-0}" = "1" ]; then
+        warn "SKIP_SYSTEMD=1 set — skipping systemd installation (container/test mode)."
+        return 0
+    fi
+
     [ "$(uname)" = "Linux" ] || {
         warn "systemd not available. Run manually: python3 ${APP_FILE}"
         return 0
