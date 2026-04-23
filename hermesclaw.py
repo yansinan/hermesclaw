@@ -19,7 +19,51 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
+try:
+    import requests
+except Exception:
+    # Minimal fallback when `requests` isn't installed inside the container.
+    # Provides `requests.post(...)` and `requests.exceptions.{Timeout,RequestException}`
+    import urllib.request as _ur
+    import urllib.error as _ue
+    class _Resp:
+        def __init__(self, code, data, headers):
+            self.status_code = code
+            self.text = data
+            self.content = data.encode("utf-8", errors="ignore")
+            self.headers = headers
+        def json(self):
+            try:
+                return json.loads(self.text) if self.text else {}
+            except Exception:
+                return {}
+    class _Exceptions:
+        class Timeout(Exception):
+            pass
+        class RequestException(Exception):
+            pass
+    def _post(url, headers=None, data=None, timeout=None):
+        if isinstance(data, str):
+            body = data.encode('utf-8')
+        else:
+            body = data
+        req = _ur.Request(url, data=body, headers=headers or {}, method='POST')
+        try:
+            with _ur.urlopen(req, timeout=timeout) as r:
+                b = r.read()
+                text = b.decode('utf-8', errors='ignore')
+                return _Resp(r.getcode(), text, dict(r.getheaders()))
+        except _ue.URLError as e:
+            # timeout or other network errors
+            if isinstance(getattr(e, 'reason', None), TimeoutError):
+                raise _Exceptions.Timeout(e)
+            raise _Exceptions.RequestException(e)
+    # Expose a requests-like module
+    class _ReqModule:
+        post = staticmethod(_post)
+        exceptions = _Exceptions
+    requests = _ReqModule()
+
 import re
 
 # ---------------------------------------------------------------------------
