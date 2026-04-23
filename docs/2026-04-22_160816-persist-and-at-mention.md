@@ -5,7 +5,7 @@
 - 2) 在微信端实现 @ 功能，允许 OpenClaw/Hermes Agent 在收到含 @ 的消息时，将消息路由到指定 agent 或广播给全部 agent。
 
 当前上下文 / 假设
-- 代码库位于 /opt/data/hermesclaw，当前分支 feature/container-hermes-side。
+- 代码库位于 /opt/data/wechat-route，当前分支 feature/container-hermes-side。
 - hermesclaw.py 已实现基本队列与路由 State 类（router_state.json 存储），当前为文件存储。
 - 容器内 Hermes 使用 /opt/data 作为配置挂载点；.env 已写入 OpenClaw/Hermes proxy 配置。
 

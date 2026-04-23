@@ -6,7 +6,7 @@ set -euo pipefail
 # connect through HermesClaw's dual proxy, and installs the systemd service.
 
 REPO_URL="${HERMESCLAW_REPO_URL:-https://github.com/AaronWong1999/hermesclaw.git}"
-PROJECT_DIR="${HERMESCLAW_DIR:-/opt/data/hermesclaw}"
+PROJECT_DIR="${HERMESCLAW_DIR:-/opt/data/wechat-route}"
 SERVICE_NAME="hermesclaw"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE="${PROJECT_DIR}/.env"
