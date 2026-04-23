@@ -19,7 +19,7 @@ from pathlib import Path
 BASE = Path(__file__).parent
 PIDFILE = BASE / "hermesclaw.pid"
 LOGFILE = BASE / "hermesclaw.log"
-HERME S_FILE = BASE / "hermesclaw.py"
+HERMES_FILE = BASE / "hermesclaw.py"
 # 支持覆盖
 HERMES_PROXY_PORT = int(os.getenv("HERMES_PROXY_PORT", "19998"))
 OPENCLAW_PROXY_PORT = int(os.getenv("OPENCLAW_PROXY_PORT", "19999"))
