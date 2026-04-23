@@ -19,52 +19,52 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
-try:
-    import requests
-except Exception:
-    # Minimal fallback when `requests` isn't installed inside the container.
-    # Provides `requests.post(...)` and `requests.exceptions.{Timeout,RequestException}`
-    import urllib.request as _ur
-    import urllib.error as _ue
-    class _Resp:
-        def __init__(self, code, data, headers):
-            self.status_code = code
-            self.text = data
-            self.content = data.encode("utf-8", errors="ignore")
-            self.headers = headers
-        def json(self):
-            try:
-                return json.loads(self.text) if self.text else {}
-            except Exception:
-                return {}
-    class _Exceptions:
-        class Timeout(Exception):
-            pass
-        class RequestException(Exception):
-            pass
-    def _post(url, headers=None, data=None, timeout=None):
-        if isinstance(data, str):
-            body = data.encode('utf-8')
-        else:
-            body = data
-        req = _ur.Request(url, data=body, headers=headers or {}, method='POST')
+# Use Python builtin urllib only (remove dependency on `requests`).
+import urllib.request as _ur
+import urllib.error as _ue
+class _Resp:
+    def __init__(self, code, data, headers):
+        self.status_code = code
+        self.text = data
+        self.content = data.encode("utf-8", errors="ignore")
+        self.headers = headers
+    def json(self):
         try:
-            with _ur.urlopen(req, timeout=timeout) as r:
-                b = r.read()
-                text = b.decode('utf-8', errors='ignore')
-                return _Resp(r.getcode(), text, dict(r.getheaders()))
-        except _ue.URLError as e:
-            # timeout or other network errors
-            if isinstance(getattr(e, 'reason', None), TimeoutError):
-                raise _Exceptions.Timeout(e)
-            raise _Exceptions.RequestException(e)
-    # Expose a requests-like module
-    class _ReqModule:
-        post = staticmethod(_post)
-        exceptions = _Exceptions
-    requests = _ReqModule()
+            return json.loads(self.text) if self.text else {}
+        except Exception:
+            return {}
+    def raise_for_status(self):
+        if getattr(self, 'status_code', 0) >= 400:
+            raise Exception(f"HTTP {getattr(self, 'status_code', '??')}")
+class _Exceptions:
+    class Timeout(Exception):
+        pass
+    class RequestException(Exception):
+        pass
+def _post(url, headers=None, data=None, timeout=None):
+    if isinstance(data, str):
+        body = data.encode('utf-8')
+    else:
+        body = data
+    req = _ur.Request(url, data=body, headers=headers or {}, method='POST')
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            b = r.read()
+            text = b.decode('utf-8', errors='ignore')
+            return _Resp(r.getcode(), text, dict(r.getheaders()))
+    except _ue.URLError as e:
+        # timeout or other network errors
+        if isinstance(getattr(e, 'reason', None), TimeoutError):
+            raise _Exceptions.Timeout(e)
+        raise _Exceptions.RequestException(e)
+# Expose a requests-like module API (post + exceptions) but backed by urllib
+class _ReqModule:
+    post = staticmethod(_post)
+    exceptions = _Exceptions
+requests = _ReqModule()
 
 import re
+from collections import deque
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -242,6 +242,13 @@ def ilink_post(base_url, ep, bd, tok, to=30):
     url = base_url.rstrip("/") + "/" + ep.lstrip("/")
     bs = json.dumps(bd)
     r = requests.post(url, headers=hdrs(tok, bs), data=bs.encode(), timeout=to)
+    # requests-like fallback may not implement raise_for_status(); provide a
+    # minimal shim to avoid noisy warnings when using the urllib fallback.
+    if not hasattr(r, 'raise_for_status'):
+        def _shim_raise():
+            if getattr(r, 'status_code', 0) >= 400:
+                raise Exception(f"HTTP {getattr(r, 'status_code', '??')}")
+        r.raise_for_status = _shim_raise
     r.raise_for_status()
     return r.json()
 
@@ -290,21 +297,32 @@ def send_text_ilink(base_url, tok, to_user, text, ctx=None):
 
 
 class MessageQueue:
-    """Thread-safe queue with blocking dequeue for long-poll simulation."""
+    """Thread-safe queue with blocking dequeue for long-poll simulation.
+
+    Uses collections.deque for O(1) popleft when capacity is exceeded. When the
+    queue is full the oldest message is discarded before adding the newest,
+    and a warning is logged.
+    """
 
     def __init__(self, capacity=QUEUE_CAP):
         self.lock = threading.Lock()
         self.event = threading.Event()
-        self.msgs = []
-        self.capacity = capacity
+        # use deque for efficient pops from left
+        self.msgs = deque()
+        self.capacity = int(capacity)
 
     def enqueue(self, msg):
         with self.lock:
             if len(self.msgs) >= self.capacity:
-                self.msgs.pop(0)
+                # drop oldest explicitly so we can log it
+                try:
+                    self.msgs.popleft()
+                except Exception:
+                    pass
                 log.warning("Queue full (%d), dropped oldest", self.capacity)
             self.msgs.append(msg)
-        self.event.set()
+            # always signal waiting long-poll clients
+            self.event.set()
 
     def dequeue_all(self, timeout=None):
         """Return all queued messages, blocking up to *timeout* seconds."""
@@ -312,7 +330,11 @@ class MessageQueue:
             self.event.wait(timeout=timeout)
         with self.lock:
             batch = list(self.msgs)
-            self.msgs.clear()
+            # clear deque
+            try:
+                self.msgs.clear()
+            except Exception:
+                self.msgs = deque()
             self.event.clear()
         return batch
 
@@ -699,9 +721,32 @@ def poll_loop(base_url, token, state, hermes_q, openclaw_q, poll_sec=None):
 
 
 def main():
-    from dotenv import load_dotenv
-
-    load_dotenv(Path(__file__).parent / ".env")
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent / ".env")
+    except Exception:
+        # python-dotenv not available — fall back to a lightweight .env loader
+        env_path = Path(__file__).parent / ".env"
+        if env_path.exists():
+            try:
+                with env_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        if "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        # don't overwrite existing environment variables
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+                log.info("Loaded .env fallback from %s", env_path)
+            except Exception:
+                log.warning("Failed to parse .env fallback; continuing with existing env vars")
+        else:
+            log.warning("python-dotenv not available and .env not found; skipping .env load")
 
     base_url = os.getenv("ILINK_BASE_URL", "https://ilinkai.weixin.qq.com")
     token = os.getenv("ILINK_TOKEN", "")

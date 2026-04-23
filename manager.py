@@ -144,9 +144,57 @@ def status():
     return 1
 
 
+def restart():
+    # Stop then start, returning start()'s code.
+    stop()
+    return start()
+
+
 def cron():
-    # 名为 cron 的入口，用于 hermes cron 调度
-    # 行为：检查并在需要时启动
+    """Named 'cron' entry used by hermes cron.
+
+    Behavior:
+    - Ensure a hermes cron job named 'wechat-route-watchdog' exists; if the
+      hermes CLI is not available or the list command fails we skip creation but
+      still perform the status check.
+    - If the service is not running, start it.
+    """
+    # Ensure hermes cron job exists when possible
+    cron_name = "wechat-route-watchdog"
+    try:
+        p = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=5)
+        if p.returncode == 0:
+            out = p.stdout or p.stderr or ""
+            if cron_name not in out:
+                # create job using absolute path to this manager script
+                script_path = str(BASE / "manager.py") + " cron"
+                create_cmd = [
+                    "hermes",
+                    "cron",
+                    "create",
+                    "--schedule",
+                    "every 1m",
+                    "--name",
+                    cron_name,
+                    "--script",
+                    script_path,
+                ]
+                try:
+                    c = subprocess.run(create_cmd, capture_output=True, text=True, timeout=10)
+                    if c.returncode == 0:
+                        print("cron: created", cron_name)
+                    else:
+                        print("cron: failed to create job (hermes returned non-zero)")
+                except Exception:
+                    print("cron: failed to create job (exception)")
+        else:
+            # hermes CLI returned error; just continue to status check
+            pass
+    except Exception:
+        # hermes CLI likely missing; skip cron creation
+        pass
+
+    # Now ensure service is running
     if running_via_pid() or any_port_running():
         print('ok')
         return 0
@@ -176,6 +224,8 @@ if __name__ == '__main__':
         sys.exit(stop())
     if cmd == 'status':
         sys.exit(status())
+    if cmd == 'restart':
+        sys.exit(restart())
     if cmd == 'cron':
         sys.exit(cron())
     if cmd == 'logs':
