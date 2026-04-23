@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+import re
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,6 +101,25 @@ class State:
 
 
 def extract_text(items):
+    """Return combined text from iLink items.
+
+    Voice items contribute only their iLink transcription by design.
+    """
+    parts = []
+    for it in items:
+        tp = it.get("type", 0)
+        if tp == T:
+            x = it.get("text_item", {}).get("text", "")
+            if x:
+                parts.append(x)
+        elif tp == VO:
+            x = it.get("voice_item", {}).get("text", "")
+            if x:
+                parts.append(
+                    f'[The user sent a voice message. Here\'s what they said: "{x}"]'
+                )
+    return "\n".join(parts).strip()
+
     """Return combined text from iLink items.
 
     Voice items contribute only their iLink transcription by design.
@@ -329,21 +349,15 @@ def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
             except Exception:
                 bd = {}
 
-            # Tag text items only in /both mode for attribution.
+            # Always tag text items with the gateway tag so recipients can see source.
             if tag:
                 msg_obj = bd.get("msg", {})
-                to_user = msg_obj.get("to_user_id", "")
-                try:
-                    route = state.get(to_user) if to_user else Route.HERMES
-                except Exception:
-                    route = Route.HERMES
-                if route == Route.BOTH:
-                    for item in msg_obj.get("item_list", []):
-                        if item.get("type") == T:
-                            ti = item.get("text_item", {})
-                            original = ti.get("text", "")
-                            if original:
-                                ti["text"] = f"{tag} {original}"
+                for item in msg_obj.get("item_list", []):
+                    if item.get("type") == T:
+                        ti = item.get("text_item", {})
+                        original = ti.get("text", "")
+                        if original:
+                            ti["text"] = f"{tag} {original}"
 
             self._forward_to_ilink(
                 "ilink/bot/sendmessage",
@@ -429,8 +443,93 @@ def route_message(uid, msg, route, hermes_q, openclaw_q):
             log.warning("OpenClaw queue not available for %s", uid[:16])
 
 
+def load_aliases(path):
+    """Load mention aliases from JSON with simple mtime caching.
+
+    Returns a dict mapping lowercase route-key -> list of normalized aliases
+    (each alias lowercased and with any leading '@' stripped).
+    """
+    try:
+        p = Path(path)
+        mtime = p.stat().st_mtime
+    except Exception:
+        log.debug("Aliases file missing or inaccessible: %s", path)
+        return {}
+    cache = getattr(load_aliases, "_cache", None)
+    if cache and cache.get("path") == str(p) and cache.get("mtime") == mtime:
+        return cache.get("aliases", {})
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        out = {}
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if not isinstance(v, list):
+                    continue
+                normalized = []
+                for a in v:
+                    if not isinstance(a, str):
+                        continue
+                    a2 = a.lstrip("@").strip().lower()
+                    if a2:
+                        normalized.append(a2)
+                if normalized:
+                    out[k.lower()] = normalized
+        load_aliases._cache = {"path": str(p), "mtime": mtime, "aliases": out}
+        return out
+    except Exception as e:
+        log.warning("Failed to load aliases %s: %s", path, e)
+        return {}
+
+
+def find_route_from_mention(text, aliases):
+    """Return (Route, matched_alias) if *text* contains an @alias defined in *aliases*.
+
+    To avoid short-alias prefix matches (e.g. @h matching @hemers), we
+    flatten aliases and check longer aliases first. Matches require the alias
+    to be followed by end-of-string or a non-word char (so @claw今天天气 still
+    matches, while @h in @hemers does not).
+
+    Returns:
+      (Route, alias_str) on match, or None when no match.
+    """
+    if not text or not aliases:
+        return None
+    flat = []
+    for key, vals in aliases.items():
+        for a in vals:
+            flat.append((key, a))
+    # prefer longer alias strings first
+    flat.sort(key=lambda t: -len(t[1]))
+    for key, a in flat:
+        # match @alias optionally followed by ':' and then end or a non-word char
+        pat = r"@" + re.escape(a) + r"(?:\:)?(?=$|[^0-9A-Za-z_])"
+        if re.search(pat, text, flags=re.IGNORECASE):
+            matched_alias = a
+            k = key.lower()
+            try:
+                if k == "hermes":
+                    return (Route.HERMES, matched_alias)
+                if k == "openclaw":
+                    return (Route.OPENCLAW, matched_alias)
+                if k == "both":
+                    return (Route.BOTH, matched_alias)
+                # allow custom route keys that match Route enum names
+                return (Route(k), matched_alias)
+            except Exception:
+                log.info("Unknown mention route key: %s", key)
+                return None
+
+
 def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
-    """Process one inbound iLink message."""
+    """Process one inbound iLink message.
+
+    Supports per-message @mentions to temporarily override routing. Aliases
+    are loaded from a JSON file specified by the MENTION_ALIASES_FILE env var
+    (defaults to ./mention_aliases.json). Slash commands (/whoami, /hermes,
+    /openclaw, /both) are intercepted and not forwarded.
+    """
+    import json as _json
+
     uid = msg.get("from_user_id", "")
     ctx = msg.get("context_token", "")
     items = msg.get("item_list", [])
@@ -456,6 +555,38 @@ def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
             send_text_ilink(base_url, token, uid, r, ctx)
             return
 
+    # Load aliases dynamically (allows admin to edit file at runtime).
+    aliases_path = os.getenv(
+        "MENTION_ALIASES_FILE",
+        str(Path(__file__).parent / "mention_aliases.json"),
+    )
+    aliases = load_aliases(aliases_path)
+
+    # Check for an @ mention that maps to a specific route.  If present,
+    # override routing for this single message only and strip the mention
+    # text before forwarding.
+    found = find_route_from_mention(txt, aliases)
+    if found:
+        # Defensive unpack: find_route_from_mention now returns (Route, alias_str)
+        if not (isinstance(found, tuple) and len(found) == 2):
+            log.error("find_route_from_mention returned unexpected value: %r", found)
+            return
+        mention_route, matched_alias = found
+        try:
+            mod_msg = _json.loads(_json.dumps(msg))  # deep copy
+            # Use the SAME matching rule to remove exactly the matched alias.
+            pat = r"@" + re.escape(matched_alias) + r"(?:\:)?(?=$|[^0-9A-Za-z_])"
+            for it in mod_msg.get("item_list", []):
+                if it.get("type") == T:
+                    ti = it.get("text_item", {})
+                    if ti.get("text"):
+                        ti["text"] = re.sub(pat, "", ti["text"], flags=re.IGNORECASE).strip()
+            route_message(uid, mod_msg, mention_route, hermes_q, openclaw_q)
+        except Exception as e:
+            log.error("Error handling mention routing: %s", e, exc_info=True)
+        return
+
+    # Default persistent routing
     route = state.get(uid)
     route_message(uid, msg, route, hermes_q, openclaw_q)
 
