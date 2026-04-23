@@ -567,11 +567,25 @@ def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
     # text before forwarding.
     found = find_route_from_mention(txt, aliases)
     if found:
-        # Defensive unpack: find_route_from_mention now returns (Route, alias_str)
-        if not (isinstance(found, tuple) and len(found) == 2):
+        # Robust unpack: accept tuple/list with >=2 items, otherwise log and skip.
+        mention_route = None
+        matched_alias = None
+        if isinstance(found, (tuple, list)):
+            if len(found) >= 2:
+                mention_route, matched_alias = found[0], found[1]
+            else:
+                log.error("find_route_from_mention returned invalid sequence: %r", found)
+                return
+        elif isinstance(found, dict):
+            # Unexpected dict shape; try to extract known keys.
+            mention_route = found.get("route")
+            matched_alias = found.get("alias")
+            if not (mention_route and matched_alias):
+                log.error("find_route_from_mention returned unexpected dict: %r", found)
+                return
+        else:
             log.error("find_route_from_mention returned unexpected value: %r", found)
             return
-        mention_route, matched_alias = found
         try:
             mod_msg = _json.loads(_json.dumps(msg))  # deep copy
             # Use the SAME matching rule to remove exactly the matched alias.
