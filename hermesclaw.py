@@ -239,18 +239,44 @@ def hdrs(tok, body=""):
 
 
 def ilink_post(base_url, ep, bd, tok, to=30):
+    """POST JSON to iLink and return parsed JSON.
+
+    Be defensive: some runtime HTTP clients may return response-like objects
+    that don't implement requests.Response.raise_for_status. Don't call
+    raise_for_status(); instead inspect status_code (or getcode) and treat
+    >=400 as an error.
+    """
     url = base_url.rstrip("/") + "/" + ep.lstrip("/")
     bs = json.dumps(bd)
     r = requests.post(url, headers=hdrs(tok, bs), data=bs.encode(), timeout=to)
-    # requests-like fallback may not implement raise_for_status(); provide a
-    # minimal shim to avoid noisy warnings when using the urllib fallback.
-    if not hasattr(r, 'raise_for_status'):
-        def _shim_raise():
-            if getattr(r, 'status_code', 0) >= 400:
-                raise Exception(f"HTTP {getattr(r, 'status_code', '??')}")
-        r.raise_for_status = _shim_raise
-    r.raise_for_status()
-    return r.json()
+
+    # Determine numeric status code in a safe, attribute-checked way.
+    status = None
+    try:
+        status = getattr(r, 'status_code', None)
+    except Exception:
+        status = None
+    if status is None:
+        # sometimes response objects expose .getcode() (urllib)
+        try:
+            status = getattr(r, 'getcode', lambda: None)()
+        except Exception:
+            status = None
+    if status is not None and int(status) >= 400:
+        raise Exception(f"HTTP {status}")
+
+    # Finally parse JSON body if available. Fall back to empty dict on error.
+    try:
+        return r.json()
+    except Exception:
+        try:
+            # Some wrappers expose .text or .content
+            txt = getattr(r, 'text', None)
+            if txt:
+                return json.loads(txt)
+        except Exception:
+            pass
+        return {}
 
 
 def get_updates_real(base_url, tok, buf="", to=None):

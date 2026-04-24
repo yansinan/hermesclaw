@@ -500,21 +500,23 @@ if ${HAS_OC_GW}; then
     fi
 fi
 
-# 10) systemd service.
-install_systemd_service
+    # 10) systemd service (skip in container).
+    install_systemd_service
 
-echo ""
-echo -e "${GREEN}Installation complete!${NC}"
-echo ""
-echo "Next steps:"
-echo "  1. Restart your gateways so they pick up the new config:"
+    echo ""
+    echo -e "${GREEN}Installation complete!${NC}"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Restart your gateways so they pick up the new config:"
 if ${HAS_HERMES_GW}; then
-    echo "     sudo systemctl restart hermes-gateway  (or however you run it)"
+    echo "     Restart Hermes gateway (container: restart the container or run the gateway command you use)."
 fi
 if ${HAS_OC_GW}; then
-    echo "     systemctl --user restart openclaw  (or however you run it)"
+    echo "     Restart OpenClaw gateway (container: restart the container or run the openclaw command you use)."
 fi
-echo "  2. Send /whoami in WeChat to verify routing"
-echo "  3. Logs: journalctl -u hermesclaw -f --no-pager"
-echo ""
-print_ai_prompt
+    echo "  2. Ensure hooks are installed so Hermes will start the wechat-route on gateway start."
+    echo "     The installer will write a hook to ~/.hermes/hooks/wechat-route/HOOK.yaml that triggers before weixin plugin loads."
+    echo "  3. The installer will NOT create a hermes cron job; the hook will ensure the cron exists when Hermes starts."
+    echo "  4. Send /whoami in WeChat to verify routing"
+    echo ""
+    print_ai_prompt

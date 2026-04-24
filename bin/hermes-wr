@@ -1,0 +1,16 @@
+#!/bin/sh
+# Lightweight wrapper to locate the hermes CLI inside common virtualenvs.
+# Exits 127 if not found.
+if [ -x "/opt/hermes/.venv/bin/hermes" ]; then
+  exec "/opt/hermes/.venv/bin/hermes" "$@"
+fi
+if [ -x "/opt/hermes/.venv/bin/python" ]; then
+  exec "/opt/hermes/.venv/bin/python" -m hermes "$@"
+fi
+# fallback to python3 -m hermes if available
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -m hermes "$@"
+fi
+# not found
+echo "hermes: not found" >&2
+exit 127

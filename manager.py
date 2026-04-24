@@ -154,47 +154,11 @@ def cron():
     """Named 'cron' entry used by hermes cron.
 
     Behavior:
-    - Ensure a hermes cron job named 'wechat-route-watchdog' exists; if the
-      hermes CLI is not available or the list command fails we skip creation but
-      still perform the status check.
-    - If the service is not running, start it.
+    - Periodic check used by hermes cron: only verify service status and start if
+      not running. This function intentionally does NOT attempt to create the
+      hermes cron job itself.
     """
-    # Ensure hermes cron job exists when possible
-    cron_name = "wechat-route-watchdog"
-    try:
-        p = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=5)
-        if p.returncode == 0:
-            out = p.stdout or p.stderr or ""
-            if cron_name not in out:
-                # create job using absolute path to this manager script
-                script_path = str(BASE / "manager.py") + " cron"
-                create_cmd = [
-                    "hermes",
-                    "cron",
-                    "create",
-                    "--schedule",
-                    "every 1m",
-                    "--name",
-                    cron_name,
-                    "--script",
-                    script_path,
-                ]
-                try:
-                    c = subprocess.run(create_cmd, capture_output=True, text=True, timeout=10)
-                    if c.returncode == 0:
-                        print("cron: created", cron_name)
-                    else:
-                        print("cron: failed to create job (hermes returned non-zero)")
-                except Exception:
-                    print("cron: failed to create job (exception)")
-        else:
-            # hermes CLI returned error; just continue to status check
-            pass
-    except Exception:
-        # hermes CLI likely missing; skip cron creation
-        pass
-
-    # Now ensure service is running
+    # Ensure service is running; do not create cron from here.
     if running_via_pid() or any_port_running():
         print('ok')
         return 0
@@ -214,10 +178,13 @@ def logs(n=200):
 
 
 if __name__ == '__main__':
+    # Default to 'cron' when no subcommand is provided. Some schedulers invoke
+    # the script path without arguments; treating that as 'cron' avoids noisy
+    # Usage output and makes the job idempotent.
     if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-    cmd = sys.argv[1]
+        cmd = 'cron'
+    else:
+        cmd = sys.argv[1]
     if cmd == 'start':
         sys.exit(start())
     if cmd == 'stop':
@@ -229,7 +196,25 @@ if __name__ == '__main__':
     if cmd == 'cron':
         sys.exit(cron())
     if cmd == 'logs':
-        n = int(sys.argv[2]) if len(sys.argv) > 2 else 200
+        # Accept numeric argument or --lines N / --lines=N / -n N for compatibility with various callers
+        n = 200
+        if len(sys.argv) > 2:
+            arg = sys.argv[2]
+            if arg.startswith('--lines='):
+                try:
+                    n = int(arg.split('=', 1)[1])
+                except Exception:
+                    pass
+            elif arg in ('--lines', '-n') and len(sys.argv) > 3:
+                try:
+                    n = int(sys.argv[3])
+                except Exception:
+                    pass
+            else:
+                try:
+                    n = int(arg)
+                except Exception:
+                    pass
         sys.exit(logs(n))
     print('unknown command')
     sys.exit(2)
