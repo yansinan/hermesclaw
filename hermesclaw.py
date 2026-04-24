@@ -209,7 +209,7 @@ def cmd(state, uid, text):
     if c == "/both":
         state.set(uid, Route.BOTH)
         return "Switched to **Hermes + OpenClaw**."
-    if c == "/whoami":
+    if c == "/w" or c == "/whoami":
         route = state.get(uid)
         return (
             f"**HermesClaw** by X @AaronYonW\n"
@@ -217,7 +217,7 @@ def cmd(state, uid, text):
             f"**/hermes** → Hermes only\n"
             f"**/openclaw** → OpenClaw only\n"
             f"**/both** → both reply\n"
-            f"**/whoami** → this status"
+            f"**/whoami**, **/w** → this status"
         )
     return None
 
