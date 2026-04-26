@@ -18,6 +18,8 @@ HermesClaw 是一个在容器中把 Hermes Agent 与 OpenClaw 同时运行在同
    - hermes cron create --schedule "every 1m" --name "wechat-route-watchdog" --script "wechat-route/manager.py cron"
    - 或使用绝对路径：hermes cron create --schedule "every 1m" --name "wechat-route-watchdog" --script "~/.hermes/skills/wechat-route/manager.py cron"
 
+Note: Minimal container images may lack ss/netstat. The cron watcher uses PID file + port check by attempting a TCP connect. This skill now includes a small helper script scripts/check_port.py for reliable portable port checks; manager.py cron can call it if needed.
+
 4) 立即测试：
    - ~/.hermes/skills/wechat-route/manager.py cron
    - 检查仓库根下的 hermesclaw.pid 与 hermesclaw.log 确认是否已启动
