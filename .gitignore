@@ -1,0 +1,35 @@
+# Environment
+.env
+
+# Runtime files
+*.log
+router_state.json
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Old v1 backup
+hermesclaw_v1.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+manager_cron_output.txt
+hermesclaw.pid
+WORKLOG.md
+references/hermesclaw-at-mention-routing-summary.md
+references/hermesclaw-container-install-summary.md
+references/ilink-rate-limit-handling-summary.md
+references/remote-browser-docs.txt
+references/wechat-route-hook-debugging-guide.md
+references/wechat-route-hook-debugging-summary.md
+references/wechat-route-patches-summary.md
+hermesclaw.pid
