@@ -778,11 +778,41 @@ def main():
     token = os.getenv("ILINK_TOKEN", "")
     hermes_port = int(os.getenv("HERMES_PROXY_PORT", "19998"))
     oc_port = int(os.getenv("OPENCLAW_PROXY_PORT", "19999"))
-    state_file = os.getenv("STATE_FILE", str(Path(__file__).parent / "router_state.json"))
-    log_file = os.getenv("LOG_FILE", str(Path(__file__).parent / "hermesclaw.log"))
+    # Expand environment variables with support for shell-style defaults like ${VAR:-default}
+    import re  # local import to avoid modifying top-of-file imports if unnecessary
+
+    def _expand_env_value(v: str) -> str:
+        if not v:
+            return v
+        # Handle ${VAR:-default} pattern
+        def _repl(m):
+            var = m.group(1)
+            default = m.group(2)
+            return os.environ.get(var, default)
+        v = re.sub(r'\$\{([^:}]+):-([^}]+)\}', _repl, v)
+        # Expand any remaining standard ${VAR} or $VAR
+        v = os.path.expandvars(v)
+        return v
+
+    # Always place state and log files in the same directory as this script.
+    state_file = str(Path(__file__).parent / "router_state.json")
+    log_file = str(Path(__file__).parent / "hermesclaw.log")
     poll_sec = int(os.getenv("LONG_POLL_TIMEOUT", "35"))
     hermes_on = os.getenv("HERMES_ENABLED", "true").lower() in ("true", "1", "yes")
     oc_on = os.getenv("OPENCLAW_ENABLED", "true").lower() in ("true", "1", "yes")
+
+    # Ensure parent directories for state and log exist. This prevents FileNotFoundError
+    try:
+        state_parent = Path(state_file).expanduser().resolve().parent
+        state_parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # best-effort; continue and let the application log if it still fails
+        pass
+    try:
+        log_parent = Path(log_file).expanduser().resolve().parent
+        log_parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
     logging.basicConfig(
         level=logging.INFO,

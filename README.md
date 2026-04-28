@@ -27,8 +27,7 @@ Note: Minimal container images may lack ss/netstat. The cron watcher uses PID fi
 重要说明
 
 - 容器内通常没有 systemd：请使用上文的 hermes cron 或外部容器管理器来守护进程。不要依赖 systemd 单元。
-- 路径与文件：PID/LOG/STATE 默认放在仓库根：hermesclaw.pid, hermesclaw.log, router_state.json；可通过环境变量覆盖（STATE_FILE, LOG_FILE, HERMES_PROXY_PORT, OPENCLAW_PROXY_PORT）。
-- .env 已在容器内更新为指向 /opt/data/wechat-route 的路径（STATE_FILE=/opt/data/wechat-route/router_state.json, LOG_FILE=/opt/data/wechat-route/hermesclaw.log）。
+- 路径与文件：PID/LOG/STATE 默认放在仓库根：hermesclaw.pid, hermesclaw.log, router_state.json；可通过环境变量覆盖（ HERMES_PROXY_PORT, OPENCLAW_PROXY_PORT）。
 - 若要把改动推回远端：容器内通常没有 Git 凭证，请使用已生成的 bundle（/opt/data/wechat-route/feature-container-hermes-side.bundle）在有凭证的宿主机上完成推送。
 
 故障排查要点（快速）

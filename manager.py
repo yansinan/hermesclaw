@@ -83,12 +83,16 @@ def start():
     if running_via_pid() or any_port_running():
         print("already running")
         return 0
-    py = None
-    venv_py = BASE / '.venv' / 'bin' / 'python'
-    if venv_py.exists():
-        py = str(venv_py)
-    else:
-        py = os.getenv('PYTHON', 'python3')
+    # 优先使用环境变量 PYTHON 指定的解释器；如果未设置，则尝试使用 .venv 中的 python；如果都不可用，则报错。
+    py = os.getenv('PYTHON', 'python3')
+    if not py:
+        venv_py = BASE / '.venv' / 'bin' / 'python'
+        if venv_py.exists():
+            py = str(venv_py)
+        else:
+            print("python executable not found")
+            return 1
+
     cmd = [py, str(BASE / 'hermesclaw.py')]
     print('starting:', ' '.join(cmd))
     out = open(LOGFILE, 'ab')
@@ -150,21 +154,6 @@ def restart():
     return start()
 
 
-def cron():
-    """Named 'cron' entry used by hermes cron.
-
-    Behavior:
-    - Periodic check used by hermes cron: only verify service status and start if
-      not running. This function intentionally does NOT attempt to create the
-      hermes cron job itself.
-    """
-    # Ensure service is running; do not create cron from here.
-    if running_via_pid() or any_port_running():
-        print('ok')
-        return 0
-    return start()
-
-
 def logs(n=200):
     try:
         data = LOGFILE.read_text(encoding='utf-8')
@@ -178,14 +167,28 @@ def logs(n=200):
 
 
 if __name__ == '__main__':
-    # Default to 'cron' when no subcommand is provided. Some schedulers invoke
-    # the script path without arguments; treating that as 'cron' avoids noisy
-    # Usage output and makes the job idempotent.
-    if len(sys.argv) < 2:
-        cmd = 'cron'
-    else:
-        cmd = sys.argv[1]
-    if cmd == 'start':
+    # Support optional flags placed before the subcommand so wrappers or cron
+    # invocations can pass arguments like --no-save-session or
+    # --no-session-persistence without making the script treat them as the
+    # command. Collect leading --flags and expose them via variables for
+    # potential future use.
+    flags = []
+    cmd = None
+    for a in sys.argv[1:]:
+        if a.startswith('-'):
+            flags.append(a)
+            continue
+        # first non-flag arg is the command
+        cmd = a
+        break
+    # If no explicit command provided, default to 'cron'. This keeps the
+    # previous behavior where invoking the script with no args runs cron.
+    if not cmd:
+        cmd = 'restart'
+    # Recognize known wrapper flags for compatibility; set local booleans.
+    NO_SAVE_SESSION = '--no-save-session' in flags
+    NO_SESSION_PERSISTENCE = '--no-session-persistence' in flags
+    if cmd == 'start' or cmd == 'cron':  # 允许 cron 命令也调用 start()，以便在 cron 模式下也能执行一次启动检查
         sys.exit(start())
     if cmd == 'stop':
         sys.exit(stop())
@@ -193,8 +196,6 @@ if __name__ == '__main__':
         sys.exit(status())
     if cmd == 'restart':
         sys.exit(restart())
-    if cmd == 'cron':
-        sys.exit(cron())
     if cmd == 'logs':
         # Accept numeric argument or --lines N / --lines=N / -n N for compatibility with various callers
         n = 200
