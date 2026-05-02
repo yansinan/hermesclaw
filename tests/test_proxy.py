@@ -205,7 +205,7 @@ class TestSendMessage:
         text = sent_data["msg"]["item_list"][0]["text_item"]["text"]
         assert text.startswith("[TestTag]")
 
-    def test_single_mode_no_tag(self, proxy_env):
+    def test_single_mode_also_tags_text(self, proxy_env):
         proxy_env["state"].set("u1", Route.HERMES)
         proxy_env["state"].mark_status_shown("u1")
 
@@ -223,7 +223,7 @@ class TestSendMessage:
         req = _MockILinkHandler.last_request
         sent_data = json.loads(req["body"])
         text = sent_data["msg"]["item_list"][0]["text_item"]["text"]
-        assert text == "hello"  # No tag in single mode.
+        assert text.startswith("[TestTag]")
 
 
 class TestProxyAllowlist:

@@ -797,7 +797,7 @@ def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
             if msgs:
                 log.info("Proxy [%s] getupdates -> %d msgs", tag or "?", len(msgs))
 
-        # -- sendmessage: forward to real iLink with optional tagging ----
+        # -- sendmessage: forward to real iLink with text tagging --------
 
         def _handle_sendmessage(self, body):
             try:
@@ -805,17 +805,9 @@ def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
             except Exception:
                 bd = {}
 
-            # Tag text only in multi-target mode (legacy: /both).
+            # Prefix every outbound text message with this proxy's tag.
             msg_obj = bd.get("msg", {})
-            to_uid = msg_obj.get("to_user_id", "")
-            should_tag = False
-            if tag and to_uid:
-                current_route = state.get(to_uid)
-                if isinstance(current_route, Route):
-                    should_tag = current_route == Route.BOTH
-                else:
-                    should_tag = _coerce_name(current_route) in ("both", "all")
-            if tag and should_tag:
+            if tag:
                 for item in msg_obj.get("item_list", []):
                     if item.get("type") == T:
                         ti = item.get("text_item", {})
