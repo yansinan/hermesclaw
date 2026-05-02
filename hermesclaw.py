@@ -1,9 +1,8 @@
-"""HermesClaw v2: dual-gateway proxy router for WeChat.
+"""HermesClaw v2: multi-gateway proxy router for WeChat.
 
-Takes over one iLink token, polls for messages, and distributes them
-to two independent proxy servers -- one for OpenClaw's clawbot and one
-for Hermes Agent's WeChat gateway.  Each gateway believes it is talking
-directly to the iLink API.
+Takes over one iLink token, polls for messages, and distributes them to
+configurable proxy servers. Each gateway believes it is talking directly to
+the iLink API.
 """
 
 import json
@@ -20,47 +19,60 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 # Use Python builtin urllib only (remove dependency on `requests`).
-import urllib.request as _ur
 import urllib.error as _ue
+import urllib.request as _ur
+
+
 class _Resp:
     def __init__(self, code, data, headers):
         self.status_code = code
         self.text = data
         self.content = data.encode("utf-8", errors="ignore")
         self.headers = headers
+
     def json(self):
         try:
             return json.loads(self.text) if self.text else {}
         except Exception:
             return {}
+
     def raise_for_status(self):
-        if getattr(self, 'status_code', 0) >= 400:
+        if getattr(self, "status_code", 0) >= 400:
             raise Exception(f"HTTP {getattr(self, 'status_code', '??')}")
+
+
 class _Exceptions:
     class Timeout(Exception):
         pass
+
     class RequestException(Exception):
         pass
+
+
 def _post(url, headers=None, data=None, timeout=None):
     if isinstance(data, str):
-        body = data.encode('utf-8')
+        body = data.encode("utf-8")
     else:
         body = data
-    req = _ur.Request(url, data=body, headers=headers or {}, method='POST')
+    req = _ur.Request(url, data=body, headers=headers or {}, method="POST")
     try:
         with _ur.urlopen(req, timeout=timeout) as r:
             b = r.read()
-            text = b.decode('utf-8', errors='ignore')
+            text = b.decode("utf-8", errors="ignore")
             return _Resp(r.getcode(), text, dict(r.getheaders()))
     except _ue.URLError as e:
         # timeout or other network errors
-        if isinstance(getattr(e, 'reason', None), TimeoutError):
+        if isinstance(getattr(e, "reason", None), TimeoutError):
             raise _Exceptions.Timeout(e)
         raise _Exceptions.RequestException(e)
+
+
 # Expose a requests-like module API (post + exceptions) but backed by urllib
 class _ReqModule:
     post = staticmethod(_post)
     exceptions = _Exceptions
+
+
 requests = _ReqModule()
 
 import re
@@ -78,6 +90,23 @@ DEFAULT_POLL_SEC = 35
 
 log = logging.getLogger("hermesclaw")
 
+DEFAULT_LEGACY_AGENTS = [
+    {
+        "name": "hermes",
+        "host": "0.0.0.0",
+        "port": 19998,
+        "tag": "[Hermes Agent]",
+        "enabled": True,
+    },
+    {
+        "name": "openclaw",
+        "host": "0.0.0.0",
+        "port": 19999,
+        "tag": "[OpenClaw]",
+        "enabled": True,
+    },
+]
+
 # ---------------------------------------------------------------------------
 # Route enum & persistent state
 # ---------------------------------------------------------------------------
@@ -89,13 +118,330 @@ class Route(str, Enum):
     BOTH = "both"
 
 
+def _env_bool(env, key, default=False):
+    raw = str(env.get(key, "true" if default else "false")).lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def _coerce_name(name):
+    if not isinstance(name, str):
+        return ""
+    return name.strip().lower()
+
+
+def _coerce_port(value, fallback):
+    try:
+        return int(value)
+    except Exception:
+        return int(fallback)
+
+
+def _legacy_agents_from_env(env):
+    return {
+        "version": 1,
+        "default_route": "hermes",
+        "groups": {},
+        "agents": [
+            {
+                "name": "hermes",
+                "host": env.get("HERMES_PROXY_HOST", "0.0.0.0"),
+                "port": _coerce_port(env.get("HERMES_PROXY_PORT", "19998"), 19998),
+                "tag": "[Hermes Agent]",
+                "enabled": _env_bool(env, "HERMES_ENABLED", default=True),
+            },
+            {
+                "name": "openclaw",
+                "host": env.get("OPENCLAW_PROXY_HOST", "0.0.0.0"),
+                "port": _coerce_port(env.get("OPENCLAW_PROXY_PORT", "19999"), 19999),
+                "tag": "[OpenClaw]",
+                "enabled": _env_bool(env, "OPENCLAW_ENABLED", default=True),
+            },
+        ],
+    }
+
+
+def _load_json_file(fp):
+    return json.loads(Path(fp).read_text(encoding="utf-8"))
+
+
+def _resolve_path(raw_path, base_dir):
+    """Resolve env-configured path with support for relative paths."""
+    p = Path(os.path.expandvars(str(raw_path))).expanduser()
+    if not p.is_absolute():
+        p = Path(base_dir) / p
+    return p
+
+
+def _normalize_agents_config(raw):
+    agents = raw.get("agents", []) if isinstance(raw, dict) else []
+    if not isinstance(agents, list):
+        raise ValueError("agents must be a list")
+
+    cleaned = []
+    for idx, agent in enumerate(agents):
+        if not isinstance(agent, dict):
+            log.warning("Skipping invalid agent entry at index=%d", idx)
+            continue
+        name = _coerce_name(agent.get("name", ""))
+        if not name:
+            log.warning("Skipping unnamed agent at index=%d", idx)
+            continue
+        entry = {
+                "name": name,
+                "host": str(agent.get("host", "0.0.0.0") or "0.0.0.0"),
+                "port": _coerce_port(agent.get("port", 0), 0),
+                "tag": str(agent.get("tag", f"[{name}]") or f"[{name}]"),
+                "enabled": bool(agent.get("enabled", True)),
+            }
+        if agent.get("aliases"):
+            entry["aliases"] = list(agent["aliases"])
+        cleaned.append(entry)
+
+    if not cleaned:
+        cleaned = [dict(x) for x in DEFAULT_LEGACY_AGENTS]
+
+    seen_names = set()
+    for agent in cleaned:
+        if agent["name"] in seen_names:
+            raise ValueError(f"duplicate agent name: {agent['name']}")
+        seen_names.add(agent["name"])
+
+    enabled = [a for a in cleaned if a.get("enabled")]
+    if not enabled:
+        raise ValueError("no enabled agents in config")
+
+    seen_ports = set()
+    for agent in enabled:
+        p = int(agent.get("port", 0))
+        if p <= 0:
+            raise ValueError(f"invalid port for agent {agent['name']}: {p}")
+        if p in seen_ports:
+            raise ValueError(f"duplicate enabled port: {p}")
+        seen_ports.add(p)
+
+    default_route = _coerce_name(raw.get("default_route", "")) if isinstance(raw, dict) else ""
+    enabled_names = [a["name"] for a in enabled]
+    if default_route not in enabled_names:
+        default_route = enabled_names[0]
+
+    groups_in = raw.get("groups", {}) if isinstance(raw, dict) else {}
+    groups = {}        # {name: [member_names]}
+    group_aliases = {}  # {name: [alias_strings]}
+    if isinstance(groups_in, dict):
+        for k, v in groups_in.items():
+            gname = _coerce_name(k)
+            if not gname:
+                continue
+            # New format: {"members": [...], "aliases": [...]}
+            if isinstance(v, dict):
+                members_raw = v.get("members", [])
+                aliases_raw_g = v.get("aliases", [])
+            elif isinstance(v, list):
+                # Old format: plain list of member names
+                members_raw = v
+                aliases_raw_g = []
+            else:
+                continue
+            members = []
+            for m in members_raw:
+                n = _coerce_name(m)
+                if n and n in enabled_names and n not in members:
+                    members.append(n)
+            if members:
+                groups[gname] = members
+            if aliases_raw_g:
+                group_aliases[gname] = aliases_raw_g
+
+    if "all" not in groups:
+        groups["all"] = enabled_names
+
+    return {
+        "version": 1,
+        "default_route": default_route,
+        "groups": groups,
+        "group_aliases": group_aliases,
+        "agents": cleaned,
+    }
+
+
+def load_agents_config(env=None, base_dir=None):
+    env = env or os.environ
+    base = Path(base_dir) if base_dir else Path(__file__).parent
+
+    raw = None
+    source = "legacy_env"
+    default_fp = base / "agents.json"
+    if default_fp.exists():
+        raw = _load_json_file(default_fp)
+        source = f"default_file:{default_fp}"
+    else:
+        cfg_file = env.get("AGENTS_CONFIG_FILE", "").strip()
+        if cfg_file:
+            fp = _resolve_path(cfg_file, base)
+            raw = _load_json_file(fp)
+            source = f"env_file:{fp}"
+        else:
+            inline = env.get("AGENTS_CONFIG", "").strip()
+            if inline:
+                raw = json.loads(inline)
+                source = "env_inline:AGENTS_CONFIG"
+            else:
+                raw = _legacy_agents_from_env(env)
+                source = "legacy_env:HERMES_/OPENCLAW_"
+
+    cfg = _normalize_agents_config(raw)
+    cfg["config_source"] = source
+
+    # Optional runtime settings carried by JSON/inline config.
+    if isinstance(raw, dict):
+        if raw.get("ilink_base_url"):
+            cfg["ilink_base_url"] = str(raw.get("ilink_base_url")).strip()
+        if raw.get("ilink_token"):
+            cfg["ilink_token"] = str(raw.get("ilink_token")).strip()
+        if raw.get("admin_ilink_uid"):
+            cfg["admin_ilink_uid"] = str(raw.get("admin_ilink_uid")).strip()
+
+    # Build aliases_raw from multiple sources (priority: top-level mention_aliases
+    # for backward compat, then per-agent aliases + per-group aliases from new format).
+    aliases_built = {}
+
+    if isinstance(raw, dict) and raw.get("mention_aliases"):
+        # Backward-compat: top-level mention_aliases blob
+        merged = dict(raw["mention_aliases"])
+        if "_groups" not in merged:
+            merged["_groups"] = cfg.get("groups", {})
+        cfg["aliases_raw"] = merged
+        return cfg
+
+    # Per-agent aliases
+    for agent in cfg.get("agents", []):
+        if not agent.get("enabled", True):
+            continue
+        aname = agent.get("name", "")
+        if aname and agent.get("aliases"):
+            aliases_built[aname] = list(agent["aliases"])
+
+    # Per-group aliases (e.g. all -> ["both", "@all"])
+    for gname, galiases in cfg.get("group_aliases", {}).items():
+        if galiases:
+            aliases_built[gname] = list(galiases)
+
+    if aliases_built:
+        aliases_built["_groups"] = cfg.get("groups", {})
+        cfg["aliases_raw"] = aliases_built
+
+    return cfg
+
+
+class AgentRegistry:
+    def __init__(self, config):
+        self.config = config
+        self.agents = config.get("agents", [])
+        self.enabled_agents = {
+            a["name"]: a for a in self.agents if a.get("enabled", True)
+        }
+        self.enabled_names = list(self.enabled_agents.keys())
+        self.groups = config.get("groups", {}) or {}
+        self.default_route = config.get("default_route") or (
+            self.enabled_names[0] if self.enabled_names else "hermes"
+        )
+        self.aliases_raw = config.get("aliases_raw")
+
+    def display_name(self, name):
+        n = _coerce_name(name)
+        if n == "hermes":
+            return "Hermes"
+        if n == "openclaw":
+            return "OpenClaw"
+        return n
+
+    def is_valid_agent(self, name):
+        return _coerce_name(name) in self.enabled_agents
+
+    def route_targets(self, route_spec):
+        if route_spec is None:
+            return [self.default_route]
+
+        if isinstance(route_spec, Route):
+            route_spec = route_spec.value
+
+        if isinstance(route_spec, str):
+            spec = _coerce_name(route_spec)
+            if spec in ("both", "all"):
+                return list(self.groups.get("all", self.enabled_names))
+            if spec.startswith("group:"):
+                g = _coerce_name(spec.split(":", 1)[1])
+                return list(self.groups.get(g, []))
+            if spec in self.enabled_agents:
+                return [spec]
+            return []
+
+        if isinstance(route_spec, dict):
+            if "group" in route_spec:
+                g = _coerce_name(route_spec.get("group"))
+                return list(self.groups.get(g, []))
+            if "agents" in route_spec and isinstance(route_spec["agents"], list):
+                out = []
+                for a in route_spec["agents"]:
+                    n = _coerce_name(a)
+                    if n in self.enabled_agents and n not in out:
+                        out.append(n)
+                return out
+            return []
+
+        if isinstance(route_spec, (list, tuple, set)):
+            out = []
+            for a in route_spec:
+                n = _coerce_name(a)
+                if n in self.enabled_agents and n not in out:
+                    out.append(n)
+            return out
+
+        return []
+
+
+def _registry_from_legacy_queues(hermes_q=None, openclaw_q=None):
+    agents = []
+    if hermes_q is not None:
+        agents.append(
+            {
+                "name": "hermes",
+                "host": "0.0.0.0",
+                "port": 19998,
+                "tag": "[Hermes Agent]",
+                "enabled": True,
+            }
+        )
+    if openclaw_q is not None:
+        agents.append(
+            {
+                "name": "openclaw",
+                "host": "0.0.0.0",
+                "port": 19999,
+                "tag": "[OpenClaw]",
+                "enabled": True,
+            }
+        )
+    if not agents:
+        agents = [dict(x) for x in DEFAULT_LEGACY_AGENTS]
+    cfg = _normalize_agents_config(
+        {
+            "agents": agents,
+            "default_route": agents[0]["name"],
+            "groups": {"all": [x["name"] for x in agents]},
+        }
+    )
+    return AgentRegistry(cfg)
+
+
 class State:
     """Per-user routing state, persisted to JSON."""
 
-    def __init__(self, fp):
+    def __init__(self, fp, default_route="hermes"):
         self.fp = Path(fp)
         self.d = {}
         self.lock = threading.Lock()
+        self.default_route = _coerce_name(default_route) or "hermes"
         if self.fp.exists():
             try:
                 self.d = json.loads(self.fp.read_text())
@@ -108,35 +454,50 @@ class State:
         t.write_text(json.dumps(self.d, indent=2, ensure_ascii=False))
         t.replace(self.fp)
 
-    def get(self, uid):
+    def get(self, uid, default_route=None):
         with self.lock:
+            default = _coerce_name(default_route or self.default_route) or "hermes"
             if uid not in self.d:
-                self.d[uid] = {"route": Route.HERMES.value, "status_shown": False}
+                self.d[uid] = {"route": default, "status_shown": False}
             entry = self.d[uid]
             # Migrate v1 format {"b": ...} to v2 {"route": ...}
-            raw = entry.get("route") or entry.get("b", Route.HERMES.value)
-            return Route(raw)
+            if "route" not in entry and "b" in entry:
+                entry["route"] = entry.get("b", default)
+            raw = entry.get("route", default)
+            if isinstance(raw, Route):
+                return raw
+            if isinstance(raw, str):
+                norm = _coerce_name(raw) or default
+                if norm in (Route.HERMES.value, Route.OPENCLAW.value, Route.BOTH.value):
+                    return Route(norm)
+                return norm
+            return Route(default) if default in (Route.HERMES.value, Route.OPENCLAW.value, Route.BOTH.value) else default
 
     def should_show_status(self, uid):
         with self.lock:
             if uid not in self.d:
-                self.d[uid] = {"route": Route.HERMES.value, "status_shown": False}
+                self.d[uid] = {"route": self.default_route, "status_shown": False}
             return not self.d[uid].get("status_shown", False)
 
     def mark_status_shown(self, uid):
         with self.lock:
             if uid not in self.d:
-                self.d[uid] = {"route": Route.HERMES.value, "status_shown": True}
+                self.d[uid] = {"route": self.default_route, "status_shown": True}
             else:
                 self.d[uid]["status_shown"] = True
             self.save()
 
     def set(self, uid, route):
+        if isinstance(route, Route):
+            route = route.value
+        route_value = _coerce_name(route)
+        if not route_value:
+            route_value = self.default_route
         with self.lock:
             status_shown = self.d.get(uid, {}).get("status_shown", False)
-            self.d[uid] = {"route": route.value, "status_shown": status_shown}
+            self.d[uid] = {"route": route_value, "status_shown": status_shown}
             self.save()
-            log.info("User %s -> %s", uid[:16], route.value)
+            log.info("User %s -> %s", uid[:16], route_value)
 
 
 # ---------------------------------------------------------------------------
@@ -164,61 +525,64 @@ def extract_text(items):
                 )
     return "\n".join(parts).strip()
 
-    """Return combined text from iLink items.
-
-    Voice items contribute only their iLink transcription by design.
-    """
-    parts = []
-    for it in items:
-        tp = it.get("type", 0)
-        if tp == T:
-            x = it.get("text_item", {}).get("text", "")
-            if x:
-                parts.append(x)
-        elif tp == VO:
-            x = it.get("voice_item", {}).get("text", "")
-            if x:
-                parts.append(
-                    f'[The user sent a voice message. Here\'s what they said: "{x}"]'
-                )
-    return "\n".join(parts).strip()
-
 
 # ---------------------------------------------------------------------------
 # Router commands
 # ---------------------------------------------------------------------------
 
 
-def route_label(r):
-    if r == Route.HERMES:
-        return "Hermes"
-    if r == Route.OPENCLAW:
-        return "OpenClaw"
-    return "Hermes + OpenClaw"
+def route_label(route_spec, registry=None):
+    reg = registry or _registry_from_legacy_queues(hermes_q=True, openclaw_q=True)
+    if isinstance(route_spec, Route):
+        route_spec = route_spec.value
+    if isinstance(route_spec, str):
+        s = _coerce_name(route_spec)
+        if s in ("both", "all"):
+            return " + ".join([reg.display_name(x) for x in reg.route_targets("both")])
+        if s in reg.enabled_agents:
+            return reg.display_name(s)
+    if isinstance(route_spec, dict) and "group" in route_spec:
+        g = _coerce_name(route_spec.get("group"))
+        members = [reg.display_name(x) for x in reg.groups.get(g, [])]
+        return f"group:{g} ({', '.join(members)})"
+    if isinstance(route_spec, (list, tuple, set)):
+        names = []
+        for x in route_spec:
+            n = _coerce_name(x)
+            if n:
+                names.append(reg.display_name(n))
+        return " + ".join(names)
+    return str(route_spec)
 
 
-def cmd(state, uid, text):
+def _status_text(state, uid, registry):
+    current = state.get(uid, default_route=registry.default_route)
+    lines = [
+        "**HermesClaw v2** by X @AaronYonW",
+        f"**Current route**: **{route_label(current, registry)}**",
+    ]
+    for name in registry.enabled_names:
+        lines.append(f"**/{name}** -> {registry.display_name(name)} only")
+    lines.append("**/both** -> default group (all)")
+    lines.append("**/whoami**, **/w** -> this status")
+    return "\n".join(lines)
+
+
+def cmd(state, uid, text, registry=None):
     """Process a slash command.  Returns reply text or None for passthrough."""
+    reg = registry or _registry_from_legacy_queues(hermes_q=True, openclaw_q=True)
     c = text.strip().lower()
-    if c == "/hermes":
-        state.set(uid, Route.HERMES)
-        return "Switched to **Hermes**."
-    if c == "/openclaw":
-        state.set(uid, Route.OPENCLAW)
-        return "Switched to **OpenClaw**."
-    if c == "/both":
-        state.set(uid, Route.BOTH)
-        return "Switched to **Hermes + OpenClaw**."
-    if c == "/w" or c == "/whoami":
-        route = state.get(uid)
-        return (
-            f"**HermesClaw** by X @AaronYonW\n"
-            f"**Current route**: **{route_label(route)}**\n"
-            f"**/hermes** → Hermes only\n"
-            f"**/openclaw** → OpenClaw only\n"
-            f"**/both** → both reply\n"
-            f"**/whoami**, **/w** → this status"
-        )
+    if c in ("/w", "/whoami"):
+        return _status_text(state, uid, reg)
+    if not c.startswith("/"):
+        return None
+    route_cmd = c[1:].split()[0]
+    if route_cmd in ("both", "all"):
+        state.set(uid, "both")
+        return f"Switched to **{route_label('both', reg)}**."
+    if reg.is_valid_agent(route_cmd):
+        state.set(uid, route_cmd)
+        return f"Switched to **{reg.display_name(route_cmd)}**."
     return None
 
 
@@ -441,9 +805,17 @@ def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
             except Exception:
                 bd = {}
 
-            # Always tag text items with the gateway tag so recipients can see source.
-            if tag:
-                msg_obj = bd.get("msg", {})
+            # Tag text only in multi-target mode (legacy: /both).
+            msg_obj = bd.get("msg", {})
+            to_uid = msg_obj.get("to_user_id", "")
+            should_tag = False
+            if tag and to_uid:
+                current_route = state.get(to_uid)
+                if isinstance(current_route, Route):
+                    should_tag = current_route == Route.BOTH
+                else:
+                    should_tag = _coerce_name(current_route) in ("both", "all")
+            if tag and should_tag:
                 for item in msg_obj.get("item_list", []):
                     if item.get("type") == T:
                         ti = item.get("text_item", {})
@@ -521,26 +893,90 @@ def make_proxy_handler(queue, ilink_base_url, ilink_token, state, tag):
 # ---------------------------------------------------------------------------
 
 
-def route_message(uid, msg, route, hermes_q, openclaw_q):
+def route_message(
+    uid,
+    msg,
+    route,
+    hermes_q=None,
+    openclaw_q=None,
+    agent_queues=None,
+    registry=None,
+):
     """Enqueue *msg* to the correct proxy queue(s) based on *route*."""
-    if route in (Route.HERMES, Route.BOTH):
-        if hermes_q:
-            hermes_q.enqueue(msg)
-        else:
-            log.warning("Hermes queue not available for %s", uid[:16])
-    if route in (Route.OPENCLAW, Route.BOTH):
-        if openclaw_q:
-            openclaw_q.enqueue(msg)
-        else:
-            log.warning("OpenClaw queue not available for %s", uid[:16])
+    if agent_queues is None:
+        agent_queues = {}
+        if hermes_q is not None:
+            agent_queues["hermes"] = hermes_q
+        if openclaw_q is not None:
+            agent_queues["openclaw"] = openclaw_q
+
+    reg = registry or _registry_from_legacy_queues(
+        hermes_q=agent_queues.get("hermes"),
+        openclaw_q=agent_queues.get("openclaw"),
+    )
+    targets = reg.route_targets(route)
+    if not targets:
+        log.warning("No route targets resolved for %s route=%r", uid[:16], route)
+        return
+
+    for target in targets:
+        q = agent_queues.get(target)
+        if q is None:
+            log.warning("Queue not available for %s target=%s", uid[:16], target)
+            continue
+        q.enqueue(msg)
 
 
-def load_aliases(path):
-    """Load mention aliases from JSON with simple mtime caching.
+def _process_aliases_data(data):
+    """Normalize a raw aliases dict -> {key: [alias, ...], '_groups': {...}}."""
+    out = {}
+    groups = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if str(k).lower() == "_groups" and isinstance(v, dict):
+                for gk, gv in v.items():
+                    gname = _coerce_name(gk)
+                    if not gname or not isinstance(gv, list):
+                        continue
+                    members = []
+                    for m in gv:
+                        mn = _coerce_name(m)
+                        if mn and mn not in members:
+                            members.append(mn)
+                    if members:
+                        groups[gname] = members
+                continue
+            if not isinstance(v, list):
+                continue
+            normalized = []
+            for a in v:
+                if not isinstance(a, str):
+                    continue
+                a2 = a.lstrip("@").strip().lower()
+                if a2:
+                    normalized.append(a2)
+            if normalized:
+                out[k.lower()] = normalized
+    if groups:
+        out["_groups"] = groups
+    return out
+
+
+def load_aliases(path_or_dict):
+    """Load mention aliases from a file path OR an inline dict.
+
+    When given a dict (e.g. from agents.json 'mention_aliases' field), it is
+    processed directly without any file I/O or caching.
+
+    When given a path string, the file is read with simple mtime caching.
 
     Returns a dict mapping lowercase route-key -> list of normalized aliases
     (each alias lowercased and with any leading '@' stripped).
     """
+    if isinstance(path_or_dict, dict):
+        return _process_aliases_data(path_or_dict)
+
+    path = path_or_dict
     try:
         p = Path(path)
         mtime = p.stat().st_mtime
@@ -552,20 +988,7 @@ def load_aliases(path):
         return cache.get("aliases", {})
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        out = {}
-        if isinstance(data, dict):
-            for k, v in data.items():
-                if not isinstance(v, list):
-                    continue
-                normalized = []
-                for a in v:
-                    if not isinstance(a, str):
-                        continue
-                    a2 = a.lstrip("@").strip().lower()
-                    if a2:
-                        normalized.append(a2)
-                if normalized:
-                    out[k.lower()] = normalized
+        out = _process_aliases_data(data)
         load_aliases._cache = {"path": str(p), "mtime": mtime, "aliases": out}
         return out
     except Exception as e:
@@ -573,8 +996,8 @@ def load_aliases(path):
         return {}
 
 
-def find_route_from_mention(text, aliases):
-    """Return (Route, matched_alias) if *text* contains an @alias defined in *aliases*.
+def find_route_from_mention(text, aliases, registry=None):
+    """Return (route_spec, matched_alias) if *text* contains an @alias.
 
     To avoid short-alias prefix matches (e.g. @h matching @hemers), we
     flatten aliases and check longer aliases first. Matches require the alias
@@ -582,12 +1005,16 @@ def find_route_from_mention(text, aliases):
     matches, while @h in @hemers does not).
 
     Returns:
-      (Route, alias_str) on match, or None when no match.
+      (route_spec, alias_str) on match, or None when no match.
     """
     if not text or not aliases:
         return None
+
+    groups = aliases.get("_groups", {}) if isinstance(aliases, dict) else {}
     flat = []
     for key, vals in aliases.items():
+        if key == "_groups":
+            continue
         for a in vals:
             flat.append((key, a))
     # prefer longer alias strings first
@@ -596,23 +1023,33 @@ def find_route_from_mention(text, aliases):
         # match @alias optionally followed by ':' and then end or a non-word char
         pat = r"@" + re.escape(a) + r"(?:\:)?(?=$|[^0-9A-Za-z_])"
         if re.search(pat, text, flags=re.IGNORECASE):
-            matched_alias = a
             k = key.lower()
-            try:
-                if k == "hermes":
-                    return (Route.HERMES, matched_alias)
-                if k == "openclaw":
-                    return (Route.OPENCLAW, matched_alias)
-                if k == "both":
-                    return (Route.BOTH, matched_alias)
-                # allow custom route keys that match Route enum names
-                return (Route(k), matched_alias)
-            except Exception:
-                log.info("Unknown mention route key: %s", key)
-                return None
+            if k in ("both", "all"):
+                return ("both", a)
+            if registry and registry.is_valid_agent(k):
+                return (k, a)
+            if k in groups:
+                return ({"group": k}, a)
+            return (k, a)
+
+    for gname in groups:
+        pat = r"@" + re.escape(gname) + r"(?:\:)?(?=$|[^0-9A-Za-z_])"
+        if re.search(pat, text, flags=re.IGNORECASE):
+            return ({"group": gname}, gname)
+
+    return None
 
 
-def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
+def proc_msg(
+    msg,
+    state,
+    base_url,
+    token,
+    hermes_q=None,
+    openclaw_q=None,
+    agent_queues=None,
+    registry=None,
+):
     """Process one inbound iLink message.
 
     Supports per-message @mentions to temporarily override routing. Aliases
@@ -634,50 +1071,50 @@ def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
     if not has_any:
         return
 
+    if agent_queues is None:
+        agent_queues = {}
+        if hermes_q is not None:
+            agent_queues["hermes"] = hermes_q
+        if openclaw_q is not None:
+            agent_queues["openclaw"] = openclaw_q
+
+    reg = registry or _registry_from_legacy_queues(
+        hermes_q=agent_queues.get("hermes"),
+        openclaw_q=agent_queues.get("openclaw"),
+    )
+
     # Show status on first contact.
     if state.should_show_status(uid) and not txt.startswith("/"):
-        reply = cmd(state, uid, "/whoami")
+        reply = cmd(state, uid, "/whoami", registry=reg)
         send_text_ilink(base_url, token, uid, reply, ctx)
         state.mark_status_shown(uid)
 
     # Slash commands are text-only; never forwarded to gateways.
     if txt.startswith("/"):
-        r = cmd(state, uid, txt)
+        r = cmd(state, uid, txt, registry=reg)
         if r:
             send_text_ilink(base_url, token, uid, r, ctx)
             return
 
-    # Load aliases dynamically (allows admin to edit file at runtime).
-    aliases_path = os.getenv(
-        "MENTION_ALIASES_FILE",
-        str(Path(__file__).parent / "mention_aliases.json"),
-    )
-    aliases = load_aliases(aliases_path)
+    # Load aliases: prefer inline dict from agents.json, else fall back to file.
+    if reg.aliases_raw is not None:
+        aliases = load_aliases(reg.aliases_raw)
+    else:
+        aliases_path = os.getenv(
+            "MENTION_ALIASES_FILE",
+            str(Path(__file__).parent / "mention_aliases.json"),
+        )
+        aliases = load_aliases(aliases_path)
 
     # Check for an @ mention that maps to a specific route.  If present,
     # override routing for this single message only and strip the mention
     # text before forwarding.
-    found = find_route_from_mention(txt, aliases)
+    found = find_route_from_mention(txt, aliases, registry=reg)
     if found:
-        # Robust unpack: accept tuple/list with >=2 items, otherwise log and skip.
-        mention_route = None
-        matched_alias = None
-        if isinstance(found, (tuple, list)):
-            if len(found) >= 2:
-                mention_route, matched_alias = found[0], found[1]
-            else:
-                log.error("find_route_from_mention returned invalid sequence: %r", found)
-                return
-        elif isinstance(found, dict):
-            # Unexpected dict shape; try to extract known keys.
-            mention_route = found.get("route")
-            matched_alias = found.get("alias")
-            if not (mention_route and matched_alias):
-                log.error("find_route_from_mention returned unexpected dict: %r", found)
-                return
-        else:
+        if not isinstance(found, (tuple, list)) or len(found) < 2:
             log.error("find_route_from_mention returned unexpected value: %r", found)
             return
+        mention_route, matched_alias = found[0], found[1]
         try:
             mod_msg = _json.loads(_json.dumps(msg))  # deep copy
             # Use the SAME matching rule to remove exactly the matched alias.
@@ -687,14 +1124,20 @@ def proc_msg(msg, state, base_url, token, hermes_q, openclaw_q):
                     ti = it.get("text_item", {})
                     if ti.get("text"):
                         ti["text"] = re.sub(pat, "", ti["text"], flags=re.IGNORECASE).strip()
-            route_message(uid, mod_msg, mention_route, hermes_q, openclaw_q)
+            route_message(
+                uid,
+                mod_msg,
+                mention_route,
+                agent_queues=agent_queues,
+                registry=reg,
+            )
         except Exception as e:
             log.error("Error handling mention routing: %s", e, exc_info=True)
         return
 
     # Default persistent routing
-    route = state.get(uid)
-    route_message(uid, msg, route, hermes_q, openclaw_q)
+    route = state.get(uid, default_route=reg.default_route)
+    route_message(uid, msg, route, agent_queues=agent_queues, registry=reg)
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +1148,16 @@ MAX_FAILS = 3
 BACKOFF = 30
 
 
-def poll_loop(base_url, token, state, hermes_q, openclaw_q, poll_sec=None):
+def poll_loop(
+    base_url,
+    token,
+    state,
+    hermes_q=None,
+    openclaw_q=None,
+    poll_sec=None,
+    agent_queues=None,
+    registry=None,
+):
     if poll_sec is None:
         poll_sec = DEFAULT_POLL_SEC
     buf = ""
@@ -728,7 +1180,16 @@ def poll_loop(base_url, token, state, hermes_q, openclaw_q, poll_sec=None):
                 buf = resp["get_updates_buf"]
             for m in resp.get("msgs", []):
                 try:
-                    proc_msg(m, state, base_url, token, hermes_q, openclaw_q)
+                    proc_msg(
+                        m,
+                        state,
+                        base_url,
+                        token,
+                        hermes_q=hermes_q,
+                        openclaw_q=openclaw_q,
+                        agent_queues=agent_queues,
+                        registry=registry,
+                    )
                 except Exception as e:
                     log.error("proc: %s", e, exc_info=True)
         except Exception as e:
@@ -774,32 +1235,29 @@ def main():
         else:
             log.warning("python-dotenv not available and .env not found; skipping .env load")
 
-    base_url = os.getenv("ILINK_BASE_URL", "https://ilinkai.weixin.qq.com")
-    token = os.getenv("ILINK_TOKEN", "")
-    hermes_port = int(os.getenv("HERMES_PROXY_PORT", "19998"))
-    oc_port = int(os.getenv("OPENCLAW_PROXY_PORT", "19999"))
-    # Expand environment variables with support for shell-style defaults like ${VAR:-default}
-    import re  # local import to avoid modifying top-of-file imports if unnecessary
+    try:
+        config = load_agents_config()
+    except Exception as e:
+        log.error("Failed to load AGENTS config: %s", e)
+        sys.exit(1)
 
-    def _expand_env_value(v: str) -> str:
-        if not v:
-            return v
-        # Handle ${VAR:-default} pattern
-        def _repl(m):
-            var = m.group(1)
-            default = m.group(2)
-            return os.environ.get(var, default)
-        v = re.sub(r'\$\{([^:}]+):-([^}]+)\}', _repl, v)
-        # Expand any remaining standard ${VAR} or $VAR
-        v = os.path.expandvars(v)
-        return v
+    base_url = (
+        str(config.get("ilink_base_url", "")).strip()
+        or os.getenv("ILINK_BASE_URL", "https://ilinkai.weixin.qq.com")
+    )
+    token = str(config.get("ilink_token", "")).strip() or os.getenv("ILINK_TOKEN", "")
 
-    # Always place state and log files in the same directory as this script.
-    state_file = str(Path(__file__).parent / "router_state.json")
-    log_file = str(Path(__file__).parent / "hermesclaw.log")
-    poll_sec = int(os.getenv("LONG_POLL_TIMEOUT", "35"))
-    hermes_on = os.getenv("HERMES_ENABLED", "true").lower() in ("true", "1", "yes")
-    oc_on = os.getenv("OPENCLAW_ENABLED", "true").lower() in ("true", "1", "yes")
+    base_dir = Path(__file__).parent
+    logs_dir = base_dir / "logs"
+    default_state = logs_dir / "router_state.json"
+    default_log = logs_dir / "hermesclaw.log"
+
+    # STATE_FILE / LOG_FILE support relative paths against script directory.
+    state_file_raw = os.getenv("STATE_FILE", "").strip()
+    log_file_raw = os.getenv("LOG_FILE", "").strip()
+    state_file = str(_resolve_path(state_file_raw, base_dir)) if state_file_raw else str(default_state)
+    log_file = str(_resolve_path(log_file_raw, base_dir)) if log_file_raw else str(default_log)
+    poll_sec = int(os.getenv("LONG_POLL_TIMEOUT", str(DEFAULT_POLL_SEC)))
 
     # Ensure parent directories for state and log exist. This prevents FileNotFoundError
     try:
@@ -814,58 +1272,66 @@ def main():
     except Exception:
         pass
 
+    handlers = [logging.FileHandler(log_file, encoding="utf-8")]
+    # Avoid duplicate log lines when manager redirects stdout/stderr to log_file.
+    if getattr(sys.stdout, "isatty", lambda: False)():
+        handlers.append(logging.StreamHandler(sys.stdout))
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file, encoding="utf-8"),
-        ],
+        handlers=handlers,
     )
 
     if not token:
         log.error("No ILINK_TOKEN set!")
         sys.exit(1)
 
-    state = State(state_file)
-    hermes_q = MessageQueue() if hermes_on else None
-    oc_q = MessageQueue() if oc_on else None
+    registry = AgentRegistry(config)
+    state = State(state_file, default_route=registry.default_route)
+    agent_queues = {}
 
     log.info("=" * 60)
-    log.info("HermesClaw v2 -- dual gateway proxy")
+    log.info("HermesClaw v2 -- multi gateway proxy")
     log.info("iLink: %s", base_url)
-    log.info("Hermes proxy: :%d (enabled=%s)", hermes_port, hermes_on)
-    log.info("OpenClaw proxy: :%d (enabled=%s)", oc_port, oc_on)
-    log.info("Default route: %s", Route.HERMES.value)
+    log.info("Config source: %s", config.get("config_source", "unknown"))
+    for agent in registry.enabled_agents.values():
+        log.info(
+            "Agent %s proxy: %s:%d (tag=%s)",
+            agent["name"],
+            agent["host"],
+            agent["port"],
+            agent["tag"],
+        )
+    log.info("Default route: %s", registry.default_route)
+    log.info("Groups: %s", ", ".join(sorted(registry.groups.keys())))
     log.info("=" * 60)
 
     servers = []
 
-    if hermes_on:
-        h_handler = make_proxy_handler(
-            hermes_q, base_url, token, state, tag="[Hermes Agent]",
+    for agent in registry.enabled_agents.values():
+        q = MessageQueue()
+        handler = make_proxy_handler(
+            q,
+            base_url,
+            token,
+            state,
+            tag=agent.get("tag", f"[{agent['name']}]")
         )
-        # Allow binding to a configurable host so the Hermes proxy can run in a container
-        h_host = os.environ.get("HERMES_PROXY_HOST", "0.0.0.0")
-        h_srv = ThreadingHTTPServer((h_host, hermes_port), h_handler)
-        threading.Thread(target=h_srv.serve_forever, daemon=True).start()
-        servers.append(h_srv)
-        log.info("Hermes proxy started on %s:%d", h_host, hermes_port)
-
-    if oc_on:
-        oc_handler = make_proxy_handler(
-            oc_q, base_url, token, state, tag="[OpenClaw]",
+        srv = ThreadingHTTPServer((agent["host"], int(agent["port"])), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        servers.append(srv)
+        agent_queues[agent["name"]] = q
+        log.info(
+            "Agent %s proxy started on %s:%d",
+            agent["name"],
+            agent["host"],
+            int(agent["port"]),
         )
-        # Allow binding to a configurable host so the OpenClaw proxy can run in a container
-        oc_host = os.environ.get("OPENCLAW_PROXY_HOST", "0.0.0.0")
-        oc_srv = ThreadingHTTPServer((oc_host, oc_port), oc_handler)
-        threading.Thread(target=oc_srv.serve_forever, daemon=True).start()
-        servers.append(oc_srv)
-        log.info("OpenClaw proxy started on %s:%d", oc_host, oc_port)
 
     poll_thread = threading.Thread(
         target=poll_loop,
-        args=(base_url, token, state, hermes_q, oc_q, poll_sec),
+        args=(base_url, token, state, None, None, poll_sec, agent_queues, registry),
         daemon=True,
     )
     poll_thread.start()

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hermesclaw import (
+    AgentRegistry,
     State,
     Route,
     cmd,
@@ -157,6 +158,34 @@ class TestCmd:
     def test_with_spaces(self, state_file):
         s = State(state_file)
         assert cmd(s, "u1", " /hermes ") is not None
+
+    def test_dynamic_agent_command(self, state_file):
+        s = State(state_file)
+        reg = AgentRegistry(
+            {
+                "agents": [
+                    {
+                        "name": "alpha",
+                        "host": "127.0.0.1",
+                        "port": 22001,
+                        "tag": "[A]",
+                        "enabled": True,
+                    },
+                    {
+                        "name": "beta",
+                        "host": "127.0.0.1",
+                        "port": 22002,
+                        "tag": "[B]",
+                        "enabled": True,
+                    },
+                ],
+                "default_route": "alpha",
+                "groups": {"all": ["alpha", "beta"]},
+            }
+        )
+        r = cmd(s, "u1", "/beta", registry=reg)
+        assert "beta" in r.lower()
+        assert s.get("u1") == "beta"
 
 
 # ── route_label ───────────────────────────────────────────────────────────

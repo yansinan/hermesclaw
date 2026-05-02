@@ -1,70 +1,123 @@
 ---
 name: wechat-route
-version: 0.1.0
-author: automated
+version: 0.2.0
+author: Hermes Operators
 license: MIT
-description: Hermes skill to manage and watchdog hermesclaw (wechat-route).
+description: 使用 manager.py 管理 hermesclaw（启动/停止/状态/守护/通知）
 ---
 
-wechat-route skill: start and watch hermesclaw from Hermes. Place this directory under ~/.hermes/skills/wechat-route and use hermes cron to register the 'cron' entrypoint.
+wechat-route 技能用于在 Hermes 环境中运维 hermesclaw（微信路由代理）。
 
-Usage examples:
-  # install (manual)
-  cp -r skill/wechat-route ~/.hermes/skills/
+目标
 
-  # register cron (run once):
-  hermes cron create --schedule "every 1m" --name "wechat-route-watchdog" --script "wechat-route/manager.py cron"
+- 用统一命令管理服务生命周期。
+- 用 cron 方式做轻量守护（定时触发 manager.py cron）。
+- 支持通过 manager.py msg 给管理员发送带前缀 [Route] 的微信通知。
 
-Commands provided by manager.py:
-  start, stop, status, cron, logs
+命令入口
 
-Environment variables:
-  HERMES_PROXY_PORT, OPENCLAW_PROXY_PORT (defaults 19998/19999)
-  PYTHON to override interpreter
+- manager.py start: 启动 hermesclaw。
+- manager.py stop: 停止 hermesclaw。
+- manager.py status: 查看运行状态（pid 或端口任一成立即判定为 running）。
+- manager.py restart: 先停后启。
+- manager.py cron: 用于 cron 守护入口（当前实现等价于执行 start）。
+- manager.py logs [n]: 查看日志尾部，默认 200 行。
+- manager.py msg "text": 向管理员发送一条微信消息，自动添加前缀 [Route]。
 
-Watchdog notes (added by automated cron run):
+重要行为
 
-Operational findings (session 2026-04-29):
+- manager.py 无参数时默认执行 restart。
+- manager.py msg 的管理员 UID 解析顺序:
+  1) agents.json 中 admin_ilink_uid
+  2) 环境变量 ADMIN_ILINK_UID
+- manager.py msg 发送参数解析顺序与主流程一致：
+  1) 脚本目录 agents.json
+  2) AGENTS_CONFIG_FILE
+  3) AGENTS_CONFIG
+  4) 回退环境变量
 
-- CONFIRMED (read-only audit): a Hermes cron job named "微信路由代理定时保持" is registered and active (Schedule: every 15m). Verified with `/opt/hermes/.venv/bin/hermes cron list` on the host. See evidence: terminal output of `hermes cron list` and job id 77896962ce17.
-- CONFIRMED (CLI incompatibility): this Hermes binary rejects `--schedule` and `--json` in some cron-related calls; attempts to create cron with `--schedule` failed (see /opt/data/hooks/wechat-route/hook.log entries showing "hermes: error: unrecognized arguments: --schedule"). Adjust automations to use the Hermes CLI form supported by your installation or create cron entries manually then verify with `hermes cron list`.
-- CONFIRMED (manager.py behaviour): the manager script's doc comment says the no-arg default is 'cron' but the implementation currently sets no-arg to 'restart' (source: /opt/data/skills/local/wechat-route/manager.py lines ~169-188). This mismatch is a real operational risk: wrappers or cron that invoke the script without an explicit subcommand can trigger an unintended restart. Recommendation: ensure cron/hooks call `manager.py cron` explicitly, or change the script default to 'cron' via a code patch and add unit tests to prevent regressions.
-- CONFIRMED (hermesclaw runtime): hermesclaw is running (pid file /opt/data/skills/local/wechat-route/hermesclaw.pid contains PID 53) and hermesclaw.log contains multiple start/stop/restart traces (evidence for intermittent restarts). Path: /opt/data/skills/local/wechat-route/hermesclaw.log.
+配置优先级
 
-These confirmations were added after a read-only operational audit and are intended to be guidance for operators. Keep sensitive values masked in documentation; see /opt/data/.env for environment variable names (sensitive values replaced with [REDACTED] in reports).
-- During interactive troubleshooting we exercised manager.py and the hook handler and discovered three recurring operational issues that are worth documenting and encoding into the skill's README and watchdog behaviour:
-  1) .env shell-style placeholders not expanded: the skill's .env files use shell-style expressions such as ${HERMES_HOME:-/opt/data} for STATE_FILE and LOG_FILE. The hermesclaw runtime does not reliably perform shell expansion in all start contexts; when HERMES_HOME is not present in the process environment this resolves to /opt/data and causes FileNotFoundError and failed writes. Evidence: /opt/data/skills/local/wechat-route/.env and hermesclaw.log tracebacks observed during the session.
-     - Recommendation (safe): change STATE_FILE and LOG_FILE to absolute paths under the skill directory (example: LOG_FILE=/opt/data/skills/local/wechat-route/hermesclaw.log) or ensure HERMES_HOME is exported before manager start. This is a minimal, reversible change.
-     - Recommendation (robust): add a small helper to manager.py or to hermesclaw.py to perform safe expansion of ${VAR:-default} (a tested expand_colon_dash Python helper is available in debugging notes). This requires a small code change and tests.
-  2) hermes CLI invocation as a module can fail: some environments attempted to run hermes with `python -m hermes` which failed with "/usr/bin/python3: No module named hermes.__main__; 'hermes' is a package and cannot be directly executed". Evidence: gateway startup logs and hook cron creation failure messages captured during debugging.
-     - Recommendation: handler scripts (and the skill) should prefer using an absolute hermes executable path when available (e.g., ~/.local/bin/hermes, HERMES_HOME/.venv/bin/hermes, /opt/hermes/.venv/bin/hermes) instead of relying on `python -m hermes`. Optionally provide a small hermes-wrapper script under the skill dir to guarantee consistent invocation for cron jobs.
-  3) manager.py default command vs cron usage: the manager.py script's no-arg behavior historically defaulted to 'restart' which can cause unexpected restarts if wrappers or cron invoke the script without explicit subcommands. Evidence: SKILL.md and manager.py main() show the default behaviour; watchdog observations and references/observed-default-behaviour.md discuss this.
-     - Recommendation: Prefer making the default no-arg command 'cron' (the safer watchdog entrypoint), or ensure cron entries explicitly call "manager.py cron". The skill documentation should call this out and provide an example hermes cron create command that includes the explicit 'cron' subcommand.
+hermesclaw 读取 agent 配置的顺序：
 
-Saved changes and rationale:
-- The skill metadata and README are updated here to include the operational findings above so future operators and automated jobs can reference them before deploying a cron or changing environment variables. The findings are non-trivial: they required running manager.py, inspecting logs, detecting differences between process env and .env placeholders, and updating handler lookup behaviour; they are therefore worth preserving.
+1. 脚本目录下 agents.json
+2. env.AGENTS_CONFIG_FILE（支持相对路径，基于脚本目录解析）
+3. env.AGENTS_CONFIG（内联 JSON）
+4. 旧变量回退 HERMES_PROXY_PORT / OPENCLAW_PROXY_PORT 等
 
-Original watchdog notes:
-- Observed behavior and safe watchdog pattern:
-  - manager.py status checks both pidfile and listening ports; it returns running if either is present. (Source: manager.py lines 59-79 and 140-148)
-  - Default no-argument command falls back to 'restart' (not 'cron'). (Source: manager.py lines 169-188)
-  - restart() performs stop() then start(). (Source: manager.py lines 151-155)
-  - start() prefers PYTHON env var then python3; it writes a pidfile and detects ports to confirm startup. (Source: manager.py lines 82-110)
+iLink 关键配置（推荐放在 agents.json）：
 
-- Operational recommendations (saved for operators and automated watchdogs):
-  1) Provide an explicit notification recipient config (e.g., ADMIN_ILINK_UID) and a safe send wrapper (scripts/send_admin_notification.py) that reads env and calls hermesclaw.send_text_ilink. Avoid ad-hoc python -c executions from cron without approval. (See references/cron-observations.md lines 20-28)
-  2) Persist restart counters under skill directory (restart_count.txt) or configurable HERMES_HOME; rotate/truncate if it grows. The watchdog can increment this file each successful restart. (Observed path: /opt/data/skills/local/wechat-route/restart_count.txt)
-  3) Document that automated runs must not perform external network sends unless ADMIN_ILINK_UID is configured and operator consent is given. (references/cron-observations.md lines 34-38)
-  4) Prefer making manager.py default command 'cron' for hermes cron entrypoint or explicitly document that empty invocation performs 'restart'. (manager.py lines 169-188)
+- ilink_base_url
+- ilink_token
+- admin_ilink_uid（可选，用于 manager.py msg）
 
-- What was saved by this edit:
-  - The above watchdog notes and recommendations are included directly in the skill metadata so future operators and automated jobs can reference them.
-  - Sources for the observations are included as in-file references; see manager.py and references/cron-observations.md in the skill directory.
+路径约定（当前实现）
 
-Supporting files to add (suggested, not created by this edit):
-  - scripts/send_admin_notification.py  # safe wrapper that reads ADMIN_ILINK_UID and ILINK_TOKEN and calls hermesclaw.send_text_ilink
-  - scripts/notify_config_example.env     # documents ADMIN_ILINK_UID and ADMIN_ILINK_BASE_URL
+- PID 默认: logs/hermesclaw.pid
+- STATE 默认: logs/router_state.json
+- hermesclaw 默认日志: logs/hermesclaw.log
+- manager.py logs 读取文件: hermesclaw.log（技能根目录）
 
-Notes:
-- This edit does not change runtime code; it documents operational findings and recommendations discovered by automated cron runs.
-- For code changes (e.g., adding the safe notification wrapper), create the scripts/ files and add them in a follow-up patch.
+admin_ilink_uid 获取方法
+
+- 推荐从 logs/router_state.json 的顶层 key 获取。
+- 这些 key 通常就是完整 from_user_id。
+- 让管理员先给机器人发一条消息，再读取该文件的 key 并写入 admin_ilink_uid。
+
+常用操作示例
+
+- 启动:
+  - python3 manager.py start
+- 注册守护（示例）:
+  - hermes cron create --schedule "every 1m" --name "wechat-route-watchdog" --script "wechat-route/manager.py cron"
+- 发送测试通知:
+  - python3 manager.py msg "watchdog started"
+
+最小可用模板（可直接复制）
+
+将下列内容保存为脚本目录下的 agents.json，即可在不依赖 .env 的情况下启动。
+
+```json
+{
+  "ilink_base_url": "https://ilinkai.weixin.qq.com",
+  "ilink_token": "replace-with-your-real-token",
+  "admin_ilink_uid": "replace-with-admin-from_user_id",
+  "default_route": "hermes",
+  "groups": {
+    "all": {
+      "members": ["hermes", "openclaw"],
+      "aliases": ["both", "all", "@all"]
+    }
+  },
+  "agents": [
+    {
+      "name": "hermes",
+      "host": "127.0.0.1",
+      "port": 19998,
+      "tag": "[Hermes]",
+      "enabled": true,
+      "aliases": ["hermes", "h", "@hermes"]
+    },
+    {
+      "name": "openclaw",
+      "host": "0.0.0.0",
+      "port": 19999,
+      "tag": "[OpenClaw]",
+      "enabled": true,
+      "aliases": ["openclaw", "claw", "@claw"]
+    }
+  ]
+}
+```
+
+说明
+
+- admin_ilink_uid 可先留空；仅在执行 manager.py msg 时必需。
+- 若需要获取 admin_ilink_uid，先让管理员发一条消息，再读取 logs/router_state.json 的顶层 key。
+- 配置文件就绪后执行 python3 manager.py start 即可。
+
+运维建议
+
+- cron 或外部调度务必显式传入子命令 cron，不要依赖无参默认行为。
+- 修改 agents.json 后需重启生效（当前为启动时加载，不是热更新）。
+- 如果你使用容器最小镜像，优先依赖 manager.py 的 pid+端口检查，不要假设存在 ss/netstat。

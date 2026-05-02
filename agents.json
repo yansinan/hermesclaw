@@ -1,0 +1,38 @@
+{
+  "ilink_base_url": "https://ilinkai.weixin.qq.com",
+  "ilink_token": "6dace489c620@im.bot:0600009b07035f4c41060b0ffe6f19b94b75a9",
+  "admin_ilink_uid": "o9cq809ahLGkqqiB9wu-7CCgW7TQ@im.wechat",
+  "default_route": "hermes",
+  "groups": {
+    "all": {
+      "members": ["hermes", "openclaw"],
+      "aliases": ["both", "all", "@all"]
+    }
+  },
+  "agents": [
+    {
+      "name": "hermes",
+      "host": "127.0.0.1",
+      "port": 19998,
+      "tag": "[Hermes]",
+      "enabled": true,
+      "aliases": ["hermes", "h", "@hermes"]
+    },
+    {
+      "name": "sys.hermes",
+      "host": "127.0.0.1",
+      "port": 19997,
+      "tag": "[sys@Hermes]",
+      "enabled": true,
+      "aliases": ["sys.hermes", "sys", "@sys.hermes","@sys"]
+    },
+    {
+      "name": "openclaw",
+      "host": "0.0.0.0",
+      "port": 19999,
+      "tag": "[OpenClaw]",
+      "enabled": true,
+      "aliases": ["openclaw", "claw", "@claw"]
+    }
+  ]
+}
