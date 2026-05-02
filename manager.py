@@ -181,8 +181,8 @@ if __name__ == '__main__':
         # first non-flag arg is the command
         cmd = a
         break
-    # If no explicit command provided, default to 'cron'. This keeps the
-    # previous behavior where invoking the script with no args runs cron.
+    # If no explicit command provided, default to 'restart'. This keeps the
+    # previous behavior where invoking the script with no args runs restart.
     if not cmd:
         cmd = 'restart'
     # Recognize known wrapper flags for compatibility; set local booleans.
