@@ -29,3 +29,4 @@ references/
 hermesclaw.pid
 restart_count.txt
 pytest-of-dr/
+.fuse_hidden*

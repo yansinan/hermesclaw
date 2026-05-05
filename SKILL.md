@@ -20,7 +20,6 @@ wechat-route 技能用于在 Hermes 环境中运维 hermesclaw（微信路由代
 - manager.py stop: 停止 hermesclaw。
 - manager.py status: 查看运行状态（pid 或端口任一成立即判定为 running）。
 - manager.py restart: 先停后启。
-- manager.py cron: 用于 cron 守护入口（当前实现等价于执行 start）。
 - manager.py logs [n]: 查看日志尾部，默认 200 行。
 - manager.py msg "text": 向管理员发送一条微信消息，自动添加前缀 [Route]。
 
@@ -119,5 +118,19 @@ admin_ilink_uid 获取方法
 运维建议
 
 - cron 或外部调度务必显式传入子命令 cron，不要依赖无参默认行为。
+
+- 明确守护模式（重要）：提供 scripts/strict_watchdog.py（见 references/strict-watchdog.md），用于严格守护。该脚本必须遵循严格检查流程：先运行 manager.py status；仅当 status 返回非运行（非 0 exit / 输出包含 “not running” 或不包含 "running" 文本）时才执行 restart 并更新 ./restart_count.txt 与发送通知。推荐将该脚本作为 cron job 调度，以避免在服务已运行时意外触发重启并增长计数。以本次会话为例，manager.py status 返回格式 "running (pid 1493 )"，脚本的文本匹配应覆盖带 pid 的 running 格式。
+  - 强制约定：不要在状态为 running 时运行 manager.py restart（避免误增 restart_count 或造成短时间多次重启）。
+  - Cron 推荐调用：python3 manager.py cron 或 scripts/strict_watchdog.py（显式子命令），绝不可使用无参 manager.py 或其他会默认执行 restart 的调用。
+
+
 - 修改 agents.json 后需重启生效（当前为启动时加载，不是热更新）。
+
+新增条目（2026-05-05）:
+
+
+- 在 skill 的 references/ 中新增 session-evidence-20260505.md，记录了本次 cron 检查的命令、输出与结论，作为审计证据和排查起点。请在发生自动重启或计数变更后，将同类事件的证据也追加到 references/ 目录。
+
 - 如果你使用容器最小镜像，优先依赖 manager.py 的 pid+端口检查，不要假设存在 ss/netstat。
+
+- 会话记录与补救（新增）：请参阅 references/session-automatic-restart.md，记录了一个因未遵循严格守护流程而在服务已运行时误触发 restart 的实例、命令与回滚建议。该文档包含建议的回滚命令与如何将 strict_watchdog.py 放到 cron 中的例子。
