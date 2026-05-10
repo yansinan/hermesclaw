@@ -19,12 +19,13 @@
       "aliases": ["hermes", "h", "@hermes"]
     },
     {
-      "name": "sys.hermes",
+      "name": "browser.hermes",
       "host": "127.0.0.1",
       "port": 19997,
-      "tag": "[sys@Hermes]",
+      "tag": "[browser@Hermes]",
       "enabled": true,
-      "aliases": ["sys.hermes", "sys", "@sys.hermes","@sys"]
+      "aliases": ["小刘","browser.hermes", "browser", "@browser.hermes","@browser"]
+
     },
     {
       "name": "openclaw",

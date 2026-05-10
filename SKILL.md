@@ -118,19 +118,33 @@ admin_ilink_uid 获取方法
 运维建议
 
 - cron 或外部调度务必显式传入子命令 cron，不要依赖无参默认行为。
-
-- 明确守护模式（重要）：提供 scripts/strict_watchdog.py（见 references/strict-watchdog.md），用于严格守护。该脚本必须遵循严格检查流程：先运行 manager.py status；仅当 status 返回非运行（非 0 exit / 输出包含 “not running” 或不包含 "running" 文本）时才执行 restart 并更新 ./restart_count.txt 与发送通知。推荐将该脚本作为 cron job 调度，以避免在服务已运行时意外触发重启并增长计数。以本次会话为例，manager.py status 返回格式 "running (pid 1493 )"，脚本的文本匹配应覆盖带 pid 的 running 格式。
-  - 强制约定：不要在状态为 running 时运行 manager.py restart（避免误增 restart_count 或造成短时间多次重启）。
-  - Cron 推荐调用：python3 manager.py cron 或 scripts/strict_watchdog.py（显式子命令），绝不可使用无参 manager.py 或其他会默认执行 restart 的调用。
-
-
+- 明确守护模式：提供 scripts/strict_watchdog.py，用于严格守护。该脚本先运行 manager.py status；仅当 status 返回非运行状态时才执行 restart。
+- 强制约定：不要在状态为 running 时运行 manager.py restart。
+- Cron 推荐调用：python3 manager.py cron 或 scripts/strict_watchdog.py，绝不可使用无参 manager.py。
 - 修改 agents.json 后需重启生效（当前为启动时加载，不是热更新）。
-
-新增条目（2026-05-05）:
-
-
-- 在 skill 的 references/ 中新增 session-evidence-20260505.md，记录了本次 cron 检查的命令、输出与结论，作为审计证据和排查起点。请在发生自动重启或计数变更后，将同类事件的证据也追加到 references/ 目录。
-
 - 如果你使用容器最小镜像，优先依赖 manager.py 的 pid+端口检查，不要假设存在 ss/netstat。
 
-- 会话记录与补救（新增）：请参阅 references/session-automatic-restart.md，记录了一个因未遵循严格守护流程而在服务已运行时误触发 restart 的实例、命令与回滚建议。该文档包含建议的回滚命令与如何将 strict_watchdog.py 放到 cron 中的例子。
+### 隧道与 hermesclaw 的关系
+
+- 当 manager.py status 显示 hermesclaw 正常运行，但隧道状态显示 LOCAL_CDP_NO + REMOTE_CDP_OK 且存在本地隧道 pidfile 时，应优先重启隧道（start_remote_browser_tunnel.sh restart），而非重启 hermesclaw。这样可以避免不必要的重启并防止误增 restart_count。
+
+### Cron 中的特殊约束
+
+- Cron 中 manager.py msg 必须使用纯 ASCII 字符。安全扫描会检测 Unicode variation selectors 并判为潜在隐写。推荐 `[OK]` `[WARN]` 格式，不使用 emoji。
+- Cron 中 `hermes update` 因安全审批 gating 不可执行。替代方式：使用 `hermes --version` 查看版本状态（包含 "Up to date" 文本）。
+- WebUI 健康检查端点：本环境 Hermes WebUI 运行在端口 8787，可通过 `curl -s http://127.0.0.1:8787/api/sessions` 检查（返回 200 且包含 "sessions" key 为正常）。
+
+
+### 自检步骤
+
+用于确认 hermesclaw 状态与常见风险点，生成可审计证据：
+
+1. **环境与二进制** — `/opt/hermes/.venv/bin/hermes --version`
+2. **环境变量（只读）** — `/opt/data/.env`，敏感值掩码
+3. **守护进程** — `manager.py status`，检查 PID / 日志 / 重启堆栈
+4. **manager.py 默认行为** — 确认无参默认是否为 restart（风险项）
+5. **Hermes cron（只读）** — `/opt/hermes/.venv/bin/hermes cron list`
+6. **Hook 日志** — `/opt/data/hooks/wechat-route/hook.log`
+7. **Hermes doctor（只读）** — `/opt/hermes/.venv/bin/hermes doctor`
+
+参考文件：`manager.py`、`hermesclaw.pid`、`hermesclaw.log`、`hook.log`、`.env`
