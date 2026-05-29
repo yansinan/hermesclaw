@@ -13,7 +13,7 @@ import requests
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermesclaw import (
+from router import (
     MessageQueue,
     State,
     Route,
@@ -107,7 +107,7 @@ class TestGetUpdates:
     def test_empty_queue_returns_empty(self, proxy_env):
         """With empty queue and very short timeout, returns empty."""
         # Override POLL_SEC for test speed via a patched constant.
-        with patch("hermesclaw.DEFAULT_POLL_SEC", 0.3):
+        with patch("router.DEFAULT_POLL_SEC", 0.3):
             handler = make_proxy_handler(
                 proxy_env["queue"],
                 "http://fake:9999", "tok",
@@ -134,7 +134,7 @@ class TestGetUpdates:
             timeout=5,
         )
         # Second call should get nothing (with short timeout).
-        with patch("hermesclaw.DEFAULT_POLL_SEC", 0.2):
+        with patch("router.DEFAULT_POLL_SEC", 0.2):
             handler = make_proxy_handler(
                 proxy_env["queue"],
                 "http://fake:9999", "tok",

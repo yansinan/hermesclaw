@@ -1,5 +1,0 @@
-# Removed runtime dependency on `requests`; uses urllib from stdlib.
-flask
-pytest
-# optional dev deps
-pyflakes

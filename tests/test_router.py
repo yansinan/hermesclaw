@@ -1,4 +1,4 @@
-"""Tests for core hermesclaw logic: State, cmd(), extract_text, routing."""
+"""Tests for core wechat-route logic: State, cmd(), extract_text, routing."""
 
 import json
 import threading
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermesclaw import (
+from router import (
     AgentRegistry,
     State,
     Route,
@@ -144,7 +144,7 @@ class TestCmd:
         s = State(state_file)
         s.set("u1", Route.OPENCLAW)
         r = cmd(s, "u1", "/whoami")
-        assert "HermesClaw v2" in r
+        assert "wechat-route" in r
         assert "OpenClaw" in r
 
     def test_passthrough(self, state_file):
@@ -294,7 +294,7 @@ class TestRouteMessage:
 
 class TestProcMsg:
     def _proc(self, msg, state, hq, oq):
-        with patch("hermesclaw.send_text_ilink"):
+        with patch("router.send_text_ilink"):
             proc_msg(msg, state, "http://fake", "tok", hq, oq)
 
     def test_text_routes_to_hermes(self, state_file, make_ilink_msg):
@@ -348,8 +348,8 @@ class TestProcMsg:
     def test_first_contact_shows_status(self, state_file, make_ilink_msg):
         s = State(state_file)
         hq, oq = MessageQueue(), MessageQueue()
-        with patch("hermesclaw.send_text_ilink") as mock_send:
+        with patch("router.send_text_ilink") as mock_send:
             proc_msg(make_ilink_msg(), s, "http://fake", "tok", hq, oq)
         assert mock_send.called
         args = mock_send.call_args[0]
-        assert "HermesClaw v2" in args[3]
+        assert "wechat-route" in args[3]

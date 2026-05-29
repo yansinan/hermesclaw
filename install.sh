@@ -1,16 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# ── HermesClaw v2 installer ──────────────────────────────────────────────
+# ── wechat-route installer ──────────────────────────────────────────────
 # Detects Hermes Agent gateway + OpenClaw gateway, configures both to
-# connect through HermesClaw's dual proxy, and installs the systemd service.
+# connect through wechat-route's dual proxy, and installs the systemd service.
 
-REPO_URL="${HERMESCLAW_REPO_URL:-https://github.com/AaronWong1999/hermesclaw.git}"
+REPO_URL="${HERMESCLAW_REPO_URL:-https://github.com/AaronWong1999/wechat-route.git}"
 PROJECT_DIR="${HERMESCLAW_DIR:-/opt/data/wechat-route}"
-SERVICE_NAME="hermesclaw"
+SERVICE_NAME="wechat-route"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ENV_FILE="${PROJECT_DIR}/.env"
-APP_FILE="${PROJECT_DIR}/hermesclaw.py"
+APP_FILE="${PROJECT_DIR}/router.py"
 HERMES_PROXY_PORT="${HERMES_PROXY_PORT:-19998}"
 OPENCLAW_PROXY_PORT="${OPENCLAW_PROXY_PORT:-19999}"
 # In container deployments there is no systemd; default to skipping systemd unless explicitly set to 0
@@ -30,7 +30,7 @@ err()  { echo -e "${RED}ERR${NC}  $1"; }
 info() { echo -e "${CYAN}INFO${NC} $1"; }
 
 echo ""
-echo -e "${CYAN}HermesClaw v2 installer${NC}"
+echo -e "${CYAN}wechat-route installer${NC}"
 echo -e "${CYAN}Dual-proxy gateway router for Hermes + OpenClaw on WeChat${NC}"
 echo ""
 
@@ -54,7 +54,7 @@ bootstrap_repo_if_needed() {
     if [ -f "${APP_FILE}" ] && [ -f "${PROJECT_DIR}/README.md" ]; then
         return 0
     fi
-    info "Cloning HermesClaw into ${PROJECT_DIR}."
+    info "Cloning wechat-route into ${PROJECT_DIR}."
     rm -rf "${PROJECT_DIR}"
     git clone "${REPO_URL}" "${PROJECT_DIR}"
 }
@@ -235,7 +235,7 @@ OPENCLAW_PROXY_PORT=${OPENCLAW_PROXY_PORT}
 HERMES_ENABLED=${hermes_on}
 OPENCLAW_ENABLED=${oc_on}
 STATE_FILE=${PROJECT_DIR}/router_state.json
-LOG_FILE=${PROJECT_DIR}/hermesclaw.log
+LOG_FILE=${PROJECT_DIR}/wechat-route.log
 LONG_POLL_TIMEOUT=35
 EOF
     chmod 600 "$ENV_FILE"
@@ -244,16 +244,16 @@ EOF
 # ── Python deps ───────────────────────────────────────────────────────────
 
 install_python_deps() {
-    info "Installing Python dependencies (requests, python-dotenv)."
+    info "Installing Python dependencies (flask)."
     # Prefer project's .venv pip if available (container-friendly). Otherwise install to user site.
     if [ -x "${PROJECT_DIR}/.venv/bin/pip" ]; then
         info "Using project's .venv pip: ${PROJECT_DIR}/.venv/bin/pip"
-        "${PROJECT_DIR}/.venv/bin/pip" install -q requests python-dotenv || warn "venv pip install failed"
+        "${PROJECT_DIR}/.venv/bin/pip" install -q flask || warn "venv pip install failed"
     elif command_exists python3 && python3 -m pip --version >/dev/null 2>&1; then
         info "Using python3 -m pip --user"
-        python3 -m pip install --user -q requests python-dotenv || warn "pip install --user failed"
+        python3 -m pip install --user -q flask || warn "pip install --user failed"
     else
-        warn "No pip available inside the container. Please install dependencies into ${PROJECT_DIR}/.venv or build a new image that includes them.\nSuggested packages: requests, python-dotenv"
+        warn "No pip available inside the container. Please install dependencies into ${PROJECT_DIR}/.venv or build a new image that includes them.\nSuggested packages: flask"
     fi
     ok "Python dependencies step complete (no system-level package manager was used)."
 }
@@ -273,9 +273,9 @@ install_systemd_service() {
     }
     need_cmd systemctl
     info "Installing ${SERVICE_NAME}.service."
-    cat > /tmp/hermesclaw.service <<EOF
+    cat > /tmp/wechat-route.service <<EOF
 [Unit]
-Description=HermesClaw v2 Dual-Proxy Router
+Description=wechat-route Dual-Proxy Router
 After=network.target
 
 [Service]
@@ -296,8 +296,8 @@ ReadWritePaths=${PROJECT_DIR}
 [Install]
 WantedBy=multi-user.target
 EOF
-    sudo cp /tmp/hermesclaw.service "${SERVICE_FILE}"
-    rm -f /tmp/hermesclaw.service
+    sudo cp /tmp/wechat-route.service "${SERVICE_FILE}"
+    rm -f /tmp/wechat-route.service
     sudo systemctl daemon-reload
     sudo systemctl enable "${SERVICE_NAME}" >/dev/null
     sudo systemctl restart "${SERVICE_NAME}"
@@ -315,7 +315,7 @@ print_ai_prompt() {
     cat <<'EOF'
 
 AI-assisted install prompt (paste this to an AI agent):
-  Read README.md and install.sh in the hermesclaw repository.
+  Read README.md and install.sh in the wechat-route repository.
   Detect whether Hermes Agent, OpenClaw, their WeChat gateways,
   python3, pip3, and systemd are present.  At least one gateway
   must be configured.  Extract the iLink token from the first
@@ -328,11 +328,11 @@ AI-assisted install prompt (paste this to an AI agent):
   manually after install.  Restart gateways.  Verify /whoami works.
 
 AI-assisted uninstall prompt:
-  Stop and disable the hermesclaw systemd service.  Restore
+  Stop and disable the wechat-route systemd service.  Restore
   openclaw-weixin account .bak files.  Remove WEIXIN_BASE_URL
   override from ~/.hermes/.env (or restore .bak).  Optionally
   restore weixin.py from its .bak if the message-splitting fix
-  was applied.  Optionally remove ~/hermesclaw directory.
+  was applied.  Optionally remove ~/wechat-route directory.
 EOF
 }
 
@@ -419,16 +419,18 @@ if ! ${HAS_HERMES_GW}; then
     warn "Hermes gateway not found. Hermes routing will be disabled."
 fi
 
-read -r -p "Continue with installation? [Y/n] " REPLY
-if [[ "${REPLY:-Y}" =~ ^[Nn]$ ]]; then
-    echo "Aborted."
-    exit 0
+if [ "${AUTO_YES}" != "1" ]; then
+    read -r -p "Continue with installation? [Y/n] " REPLY
+    if [[ "${REPLY:-Y}" =~ ^[Nn]$ ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 fi
 
 # 5) Install deps.
 install_python_deps
 
-# 6) Write HermesClaw .env.
+# 6) Write wechat-route .env.
 write_env_file "$ILINK_TOKEN_VALUE" "${HAS_HERMES_GW}" "${HAS_OC_GW}"
 ok "Wrote ${ENV_FILE}"
 
@@ -460,7 +462,11 @@ if ${HAS_HERMES_GW}; then
     echo ""
     echo "We can patch weixin.py to keep messages as single units (split by length only)."
     echo -e "${YELLOW}推荐 (Recommended): Apply this fix.${NC}"
-    read -r -p "Apply Hermes message splitting fix? [Y/n] " APPLY_SPLIT_FIX
+    if [ "${AUTO_YES}" = "1" ]; then
+        APPLY_SPLIT_FIX=Y
+    else
+        read -r -p "Apply Hermes message splitting fix? [Y/n] " APPLY_SPLIT_FIX
+    fi
     if [[ "${APPLY_SPLIT_FIX:-Y}" =~ ^[Yy]$ ]] || [[ "${APPLY_SPLIT_FIX:-}" == "" ]]; then
         info "Applying Hermes Agent message splitting fix..."
         FIX_SCRIPT="${PROJECT_DIR}/fix_hermes_splitting.sh"

@@ -9,7 +9,7 @@ import pytest
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermesclaw import (
+from router import (
     State,
     Route,
     MessageQueue,
@@ -124,6 +124,6 @@ class TestSingleGateway:
         s = State(state_file)
         s.mark_status_shown("user123")
         hq = MessageQueue()
-        with patch("hermesclaw.send_text_ilink"):
+        with patch("router.send_text_ilink"):
             proc_msg(make_ilink_msg(), s, "http://fake", "tok", hq, None)
         assert hq.size() == 1

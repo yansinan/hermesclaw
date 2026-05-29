@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from hermesclaw import AgentRegistry, load_agents_config
+from router import AgentRegistry, load_agents_config
 
 
 def test_load_agents_config_from_file(tmp_path, monkeypatch):

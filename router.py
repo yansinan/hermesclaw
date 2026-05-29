@@ -1,8 +1,13 @@
-"""HermesClaw v2: multi-gateway proxy router for WeChat.
+"""wechat-route v1.0.0: 微信 iLink 多网关消息路由代理。
 
-Takes over one iLink token, polls for messages, and distributes them to
-configurable proxy servers. Each gateway believes it is talking directly to
-the iLink API.
+接管一个 iLink token，轮询拉取消息，按配置分发到多个后端代理端口。
+每个后端（Hermes Agent / OpenClaw 等）认为自己直连 iLink API。
+
+架构：
+  iLink(微信) ←→ wechat-route(路由器) ←→ Hermes Agent(19998)
+                                       ←→ browser.hermes(19997)
+                                       ←→ helix(19996)
+                                       ←→ OpenClaw(19999)
 """
 
 import json
@@ -79,17 +84,18 @@ import re
 from collections import deque
 
 # ---------------------------------------------------------------------------
-# Constants
+# 常量定义
 # ---------------------------------------------------------------------------
 
-T, VO = 1, 3  # iLink message types: text, voice
-ILINK_VER = "2.1.7"
-ILINK_CV = "65547"
-QUEUE_CAP = 200
-DEFAULT_POLL_SEC = 35
+T, VO = 1, 3  # iLink 消息类型: 1=文本, 3=语音
+ILINK_VER = "2.1.7"  # iLink 协议版本号
+ILINK_CV = "65547"   # iLink 客户端版本
+QUEUE_CAP = 200      # 每个 agent 的消息队列容量
+DEFAULT_POLL_SEC = 35  # iLink 长轮询超时（秒）
 
-log = logging.getLogger("hermesclaw")
+log = logging.getLogger("wechat-route")
 
+# 无配置文件时的默认 agent 列表（向后兼容）
 DEFAULT_LEGACY_AGENTS = [
     {
         "name": "hermes",
@@ -108,11 +114,12 @@ DEFAULT_LEGACY_AGENTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Route enum & persistent state
+# 路由枚举 & 用户状态持久化
 # ---------------------------------------------------------------------------
 
 
 class Route(str, Enum):
+    """路由模式：发送到指定 agent 或广播到全部。"""
     HERMES = "hermes"
     OPENCLAW = "openclaw"
     BOTH = "both"
@@ -265,6 +272,7 @@ def _normalize_agents_config(raw):
 
 
 def load_agents_config(env=None, base_dir=None):
+    """加载 agent 配置，优先级: agents.json > AGENTS_CONFIG_FILE > AGENTS_CONFIG > 环境变量回退"""
     env = env or os.environ
     base = Path(base_dir) if base_dir else Path(__file__).parent
 
@@ -438,6 +446,10 @@ class State:
     """Per-user routing state, persisted to JSON."""
 
     def __init__(self, fp, default_route="hermes"):
+        """初始化状态存储。
+        fp: 持久化文件路径（JSON）
+        default_route: 新用户的默认路由
+        """
         self.fp = Path(fp)
         self.d = {}
         self.lock = threading.Lock()
@@ -501,7 +513,7 @@ class State:
 
 
 # ---------------------------------------------------------------------------
-# Text extraction (voice -> transcription)
+# 消息文本提取（语音转文字）
 # ---------------------------------------------------------------------------
 
 
@@ -558,7 +570,7 @@ def route_label(route_spec, registry=None):
 def _status_text(state, uid, registry):
     current = state.get(uid, default_route=registry.default_route)
     lines = [
-        "**HermesClaw v2** by X @AaronYonW",
+        "**wechat-route** by X @AaronYonW",
         f"**Current route**: **{route_label(current, registry)}**",
     ]
     for name in registry.enabled_names:
@@ -687,11 +699,10 @@ def send_text_ilink(base_url, tok, to_user, text, ctx=None):
 
 
 class MessageQueue:
-    """Thread-safe queue with blocking dequeue for long-poll simulation.
+    """线程安全的消息队列，支持长轮询阻塞读取。
 
-    Uses collections.deque for O(1) popleft when capacity is exceeded. When the
-    queue is full the oldest message is discarded before adding the newest,
-    and a warning is logged.
+    用 deque 实现 O(1) 的队首弹出。队列满时丢弃最旧消息并记日志。
+    通过 threading.Event 实现 getupdates 的长轮询等待。
     """
 
     def __init__(self, capacity=QUEUE_CAP):
@@ -734,7 +745,8 @@ class MessageQueue:
 
 
 # ---------------------------------------------------------------------------
-# Gateway proxy handler
+# 代理请求处理 — 每个 agent 一个独立的 HTTP 代理服务器
+# 接收后端（Hermes/OpenClaw）的 iLink 请求，转发到真实 iLink 接口
 # ---------------------------------------------------------------------------
 
 PROXY_ALLOWLIST = frozenset([
@@ -1045,8 +1057,8 @@ def proc_msg(
     """Process one inbound iLink message.
 
     Supports per-message @mentions to temporarily override routing. Aliases
-    are loaded from a JSON file specified by the MENTION_ALIASES_FILE env var
-    (defaults to ./mention_aliases.json). Slash commands (/whoami, /hermes,
+    are loaded from agents.json per-agent aliases (or the MENTION_ALIASES_FILE
+    env var as fallback). Slash commands (/whoami, /hermes,
     /openclaw, /both) are intercepted and not forwarded.
     """
     import json as _json
@@ -1094,7 +1106,7 @@ def proc_msg(
     else:
         aliases_path = os.getenv(
             "MENTION_ALIASES_FILE",
-            str(Path(__file__).parent / "mention_aliases.json"),
+            "",
         )
         aliases = load_aliases(aliases_path)
 
@@ -1195,11 +1207,16 @@ def poll_loop(
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# 入口函数
+# 1) 加载 .env + agents.json 配置
+# 2) 为每个 agent 启动代理服务器
+# 3) 启动 iLink 轮询线程
+# 4) 等待退出信号
 # ---------------------------------------------------------------------------
 
 
 def main():
+    """启动路由代理：加载配置、启动代理服务、开始轮询 iLink 消息。"""
     try:
         from dotenv import load_dotenv
         load_dotenv(Path(__file__).parent / ".env")
@@ -1242,7 +1259,7 @@ def main():
     base_dir = Path(__file__).parent
     logs_dir = base_dir / "logs"
     default_state = logs_dir / "router_state.json"
-    default_log = logs_dir / "hermesclaw.log"
+    default_log = logs_dir / "wechat-route.log"
 
     # STATE_FILE / LOG_FILE support relative paths against script directory.
     state_file_raw = os.getenv("STATE_FILE", "").strip()
@@ -1284,7 +1301,7 @@ def main():
     agent_queues = {}
 
     log.info("=" * 60)
-    log.info("HermesClaw v2 -- multi gateway proxy")
+    log.info("wechat-route -- multi gateway proxy")
     log.info("iLink: %s", base_url)
     log.info("Config source: %s", config.get("config_source", "unknown"))
     for agent in registry.enabled_agents.values():

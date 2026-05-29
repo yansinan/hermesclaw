@@ -1,0 +1,33 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Runtime data (host-persisted via volume)
+logs/
+router_state.json
+*.log
+*.tmp
+wechat-route.pid
+
+# Dev / docs
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+pytest-of-dr/
+.fuse_hidden*
+
+# Test code (not needed at runtime)
+tests/
+test_*.py
+conftest.py

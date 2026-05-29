@@ -1,0 +1,20 @@
+# wechat-route — 最小 docker-compose
+# Usage: docker compose up -d
+
+services:
+  wechat-route:
+    build: .
+    container_name: wechat-route
+    restart: on-failure:10
+    network_mode: "host"
+
+    volumes:
+      # Runtime data (logs + state) persisted on host
+      - ./logs:/app/logs
+
+      # Config: mount your agents.json to override the built-in default
+      - ./agents.json:/app/agents.json:ro
+
+    environment:
+      - STATE_FILE=/app/logs/router_state.json
+      - LOG_FILE=/app/logs/wechat-route.log
