@@ -28,6 +28,15 @@
 
     },
     {
+      "name": "helix",
+      "host": "127.0.0.1",
+      "port": 19996,
+      "tag": "[helix@Hermes]",
+      "enabled": true,
+      "aliases": ["@h","helix", "@helix"]
+
+    },    
+    {
       "name": "openclaw",
       "host": "0.0.0.0",
       "port": 19999,
