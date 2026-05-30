@@ -1,7 +1,7 @@
 # wechat-route v1.0.0 — 微信 iLink 消息路由代理
 # 纯 Python stdlib，镜像 ~56MB
-FROM alpine:3.21
-
+FROM alpine:latest
+# FROM python:3.11-alpine 
 WORKDIR /app
 
 # Install Python 3 + ca-certificates only; remove pip/build tools after use
@@ -14,14 +14,14 @@ RUN apk add --no-cache python3 ca-certificates && \
 RUN ln -sf python3 /usr/bin/python
 
 # Copy project files
-COPY router.py agents.json ./
+COPY router.py proxy.py agents.json ./
 COPY bin/ ./bin/
 
 # Runtime data directory
 RUN mkdir -p logs
 
-# Proxy ports
-EXPOSE 19998 19999
+# Proxy ports (各 agent 后端端口) + 统一入口
+EXPOSE 19990 19998 19999
 
-# Default: launch the router directly
-CMD ["python3", "router.py"]
+# Default: launch the proxy + router
+CMD ["sh", "bin/entrypoint.sh"]

@@ -1,5 +1,6 @@
 # wechat-route — 最小 docker-compose
 # Usage: docker compose up -d
+# 外部 Agent 连接统一入口 :19990，路径前缀路由（如 /hermes/ilink/bot/getupdates）
 
 services:
   wechat-route:
@@ -18,3 +19,6 @@ services:
     environment:
       - STATE_FILE=/app/logs/router_state.json
       - LOG_FILE=/app/logs/wechat-route.log
+      # - PROXY_PORT=19990
+    port:
+      - 19990:19990

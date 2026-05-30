@@ -17,6 +17,23 @@ docker compose logs -f
 
 容器异常退出会自动重启，最多重试 10 次后停止。
 
+## 接入方式
+
+外部 Agent 可通过**端口**或**路径前缀**两种方式连接：
+
+| 方式 | 连接地址 | 说明 |
+|---|---|---|
+| 端口区分（老） | `host:19998`、`host:19997` 等 | 直连各 agent 后端端口 |
+| 路径前缀（新） | `host:19990/hermes`、`host:19990/helix` | 统一入口，path 自动路由 |
+
+示例 Agent 配置（路径前缀模式）：
+```python
+# Hermes Agent 的 ILINK_BASE_URL
+ILINK_BASE_URL=http://wechat-route:19990/hermes
+```
+
+两种方式**同时可用**，不加新镜像依赖。
+
 ## agents.json 配置
 
 ```json

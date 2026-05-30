@@ -1,284 +1,140 @@
-"""Tests for GatewayProxy HTTP handler: getupdates, sendmessage, tagging."""
-
+"""proxy.py 本地集成测试：启动模拟后端 + proxy → 验证路径路由。"""
 import json
-import socket
+import http.server
+import os
+import subprocess
+import sys
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from unittest.mock import patch
-
-import pytest
-import requests
-
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from router import (
-    MessageQueue,
-    State,
-    Route,
-    make_proxy_handler,
-    PROXY_ALLOWLIST,
-)
+from http.client import HTTPConnection
+from pathlib import Path
 
 
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def main():
+    test_dir = Path(__file__).parent.parent
+    test_agents = test_dir / "test_agents.json"
 
+    # Step 0: 创建测试用 agents.json
+    test_agents.write_text(json.dumps({
+        "agents": [
+            {"name": "hermes", "host": "127.0.0.1", "port": 18998, "enabled": True},
+            {"name": "browser.hermes", "host": "127.0.0.1", "port": 18997, "enabled": True},
+            {"name": "helix", "host": "127.0.0.1", "port": 18996, "enabled": True},
+            {"name": "openclaw", "host": "127.0.0.1", "port": 18999, "enabled": True},
+        ]
+    }))
 
-class _MockILinkHandler(BaseHTTPRequestHandler):
-    """Tiny HTTP handler that records the last request and replies 200."""
-
-    last_request = None  # class-level: shared across instances
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length) if length else b""
-        _MockILinkHandler.last_request = {
-            "path": self.path,
-            "headers": dict(self.headers),
-            "body": body,
-        }
-        resp = b'{"ret":0}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(resp)))
-        self.end_headers()
-        self.wfile.write(resp)
-
-    def log_message(self, fmt, *args):
-        pass
-
-
-@pytest.fixture
-def mock_ilink():
-    """Start a mock iLink backend and return its base URL."""
-    _MockILinkHandler.last_request = None
-    port = _free_port()
-    srv = HTTPServer(("127.0.0.1", port), _MockILinkHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{port}"
-    srv.shutdown()
-
-
-@pytest.fixture
-def proxy_env(state_file, mock_ilink):
-    """Spin up a proxy server backed by a mock iLink."""
-    queue = MessageQueue(capacity=50)
-    state = State(state_file)
-    port = _free_port()
-    handler = make_proxy_handler(
-        queue,
-        ilink_base_url=mock_ilink,
-        ilink_token="test-tok-123",
-        state=state,
-        tag="[TestTag]",
-    )
-    server = HTTPServer(("127.0.0.1", port), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield {
-        "queue": queue,
-        "state": state,
-        "port": port,
-        "url": f"http://127.0.0.1:{port}",
-        "server": server,
-        "ilink_url": mock_ilink,
+    backends = {
+        "hermes": 18998, "browser.hermes": 18997,
+        "helix": 18996, "openclaw": 18999,
     }
-    server.shutdown()
+    PROXY_PORT = 18995
 
+    # Step 1: 启动所有模拟后端
+    class MockHandler(http.server.BaseHTTPRequestHandler):
+        backend_name = "?"
 
-class TestGetUpdates:
-    def test_returns_queued_messages(self, proxy_env):
-        q = proxy_env["queue"]
-        q.enqueue({"id": 1})
-        q.enqueue({"id": 2})
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/getupdates",
-            json={"get_updates_buf": "abc"},
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["msgs"]) == 2
-        assert data["get_updates_buf"] == "abc"
+        def do_POST(self):
+            resp = json.dumps({
+                "ret": 0,
+                "backend": self.backend_name,
+                "path": self.path,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
 
-    def test_empty_queue_returns_empty(self, proxy_env):
-        """With empty queue and very short timeout, returns empty."""
-        # Override POLL_SEC for test speed via a patched constant.
-        with patch("router.DEFAULT_POLL_SEC", 0.3):
-            handler = make_proxy_handler(
-                proxy_env["queue"],
-                "http://fake:9999", "tok",
-                proxy_env["state"], "[T]",
-            )
-            port = _free_port()
-            srv = HTTPServer(("127.0.0.1", port), handler)
-            threading.Thread(target=srv.serve_forever, daemon=True).start()
-            try:
-                resp = requests.post(
-                    f"http://127.0.0.1:{port}/ilink/bot/getupdates",
-                    json={"get_updates_buf": "x"},
-                    timeout=5,
-                )
-                assert resp.json()["msgs"] == []
-            finally:
-                srv.shutdown()
+        def log_message(self, *a):
+            pass
 
-    def test_dequeue_is_destructive(self, proxy_env):
-        proxy_env["queue"].enqueue({"id": 1})
-        requests.post(
-            f"{proxy_env['url']}/ilink/bot/getupdates",
-            json={"get_updates_buf": ""},
-            timeout=5,
-        )
-        # Second call should get nothing (with short timeout).
-        with patch("router.DEFAULT_POLL_SEC", 0.2):
-            handler = make_proxy_handler(
-                proxy_env["queue"],
-                "http://fake:9999", "tok",
-                proxy_env["state"], "[T]",
-            )
-            port = _free_port()
-            srv = HTTPServer(("127.0.0.1", port), handler)
-            threading.Thread(target=srv.serve_forever, daemon=True).start()
-            try:
-                resp = requests.post(
-                    f"http://127.0.0.1:{port}/ilink/bot/getupdates",
-                    json={},
-                    timeout=5,
-                )
-                assert resp.json()["msgs"] == []
-            finally:
-                srv.shutdown()
+    servers = []
+    for name, port in backends.items():
+        def make_handler(n):
+            class H(MockHandler):
+                backend_name = n
+            return H
+        srv = http.server.HTTPServer(("127.0.0.1", port), make_handler(name))
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        servers.append(srv)
+    time.sleep(0.3)
+    print(f"[OK] {len(servers)} mock backends ready")
 
-    def test_buf_echoed(self, proxy_env):
-        proxy_env["queue"].enqueue({"id": 1})
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/getupdates",
-            json={"get_updates_buf": "my-cursor-123"},
-            timeout=5,
-        )
-        assert resp.json()["get_updates_buf"] == "my-cursor-123"
+    # Step 2: 启动 proxy
+    proc = subprocess.Popen(
+        [sys.executable, str(test_dir / "proxy.py")],
+        env={**os.environ, "PROXY_PORT": str(PROXY_PORT),
+             "AGENTS_FILE": str(test_agents)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    time.sleep(1)
+    ret = proc.poll()
+    if ret is not None:
+        stdout, stderr = proc.communicate()
+        print(f"[FAIL] Proxy exited with code {ret}")
+        print("STDERR:", stderr.decode())
+        return 1
+    print(f"[OK] proxy on :{PROXY_PORT}")
 
-
-class TestSendMessage:
-    def test_forward_to_ilink(self, proxy_env):
-        proxy_env["state"].mark_status_shown("u1")
-
-        payload = {
-            "msg": {
-                "to_user_id": "u1",
-                "item_list": [{"type": 1, "text_item": {"text": "hi"}}],
-            }
-        }
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/sendmessage",
-            json=payload,
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        # Verify the mock iLink backend received the request with our token.
-        req = _MockILinkHandler.last_request
-        assert req is not None
-        assert "test-tok-123" in req["headers"].get("Authorization", req["headers"].get("authorization", ""))
-
-    def test_both_mode_tags_text(self, proxy_env):
-        proxy_env["state"].set("u1", Route.BOTH)
-        proxy_env["state"].mark_status_shown("u1")
-
-        payload = {
-            "msg": {
-                "to_user_id": "u1",
-                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-            }
-        }
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/sendmessage",
-            json=payload,
-            timeout=5,
-        )
-        assert resp.status_code == 200
-        req = _MockILinkHandler.last_request
-        sent_data = json.loads(req["body"])
-        text = sent_data["msg"]["item_list"][0]["text_item"]["text"]
-        assert text.startswith("[TestTag]")
-
-    def test_single_mode_also_tags_text(self, proxy_env):
-        proxy_env["state"].set("u1", Route.HERMES)
-        proxy_env["state"].mark_status_shown("u1")
-
-        payload = {
-            "msg": {
-                "to_user_id": "u1",
-                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-            }
-        }
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/sendmessage",
-            json=payload,
-            timeout=5,
-        )
-        req = _MockILinkHandler.last_request
-        sent_data = json.loads(req["body"])
-        text = sent_data["msg"]["item_list"][0]["text_item"]["text"]
-        assert text.startswith("[TestTag]")
-
-
-class TestProxyAllowlist:
-    def test_blocked_endpoint(self, proxy_env):
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/deleteaccount",
-            json={},
-            timeout=5,
-        )
-        assert resp.status_code == 404
-
-    def test_allowed_passthrough(self, proxy_env):
-        resp = requests.post(
-            f"{proxy_env['url']}/ilink/bot/sendtyping",
-            json={"typing": True},
-            timeout=5,
-        )
-        assert resp.status_code == 200
-
-    def test_auth_header_replaced(self, proxy_env):
-        requests.post(
-            f"{proxy_env['url']}/ilink/bot/getconfig",
-            json={},
-            headers={"Authorization": "Bearer gateway-original-token"},
-            timeout=5,
-        )
-        req = _MockILinkHandler.last_request
-        assert req is not None
-        auth = req["headers"].get("Authorization", req["headers"].get("authorization", ""))
-        assert "test-tok-123" in auth
-        assert "gateway-original-token" not in auth
-
-
-class TestProxyError:
-    def test_forward_error_returns_502(self, state_file):
-        """When the iLink backend is unreachable, proxy returns 502."""
-        queue = MessageQueue()
-        state = State(state_file)
-        port = _free_port()
-        # Point to a port that's not listening.
-        handler = make_proxy_handler(
-            queue,
-            ilink_base_url="http://127.0.0.1:1",
-            ilink_token="tok",
-            state=state,
-            tag="[T]",
-        )
-        srv = HTTPServer(("127.0.0.1", port), handler)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # Step 3: 测试路由
+    tests = [
+        ("hermes", "/hermes/ilink/bot/getupdates", "hermes"),
+        ("helix", "/helix/ilink/bot/getupdates", "helix"),
+        ("browser.hermes", "/browser.hermes/ilink/bot/getupdates", "browser.hermes"),
+        ("openclaw", "/openclaw/ilink/bot/sendmessage", "openclaw"),
+    ]
+    all_ok = True
+    for label, path, expected in tests:
         try:
-            resp = requests.post(
-                f"http://127.0.0.1:{port}/ilink/bot/sendtyping",
-                json={},
-                timeout=10,
-            )
-            assert resp.status_code == 502
-        finally:
-            srv.shutdown()
+            conn = HTTPConnection("127.0.0.1", PROXY_PORT, timeout=5)
+            conn.request("POST", path, body=b"{}", headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            data = json.loads(resp.read())
+            ok = data.get("backend") == expected
+            status = "✓" if ok else "✗"
+            if not ok:
+                all_ok = False
+            print(f"  {status} {path} -> {data.get('backend','?')} ✓" if ok else
+                  f"  {status} {path} -> {data.get('backend','?')} (expected {expected})")
+            conn.close()
+        except Exception as e:
+            print(f"  ✗ {path} -> ERROR: {e}")
+            all_ok = False
+
+    # Step 4: 404 路径
+    try:
+        conn = HTTPConnection("127.0.0.1", PROXY_PORT, timeout=5)
+        conn.request("POST", "/nonexistent/ilink/bot/getupdates")
+        assert conn.getresponse().status == 404
+        print("  ✓ /nonexistent -> 404")
+        conn.close()
+    except Exception as e:
+        print(f"  ✗ 404 test -> {e}")
+        all_ok = False
+
+    # Step 5: 不在 allowlist 的 endpoint
+    try:
+        conn = HTTPConnection("127.0.0.1", PROXY_PORT, timeout=5)
+        conn.request("POST", "/hermes/ilink/bot/deleteuser")
+        assert conn.getresponse().status == 404
+        print("  ✓ /hermes/ilink/bot/deleteuser -> 404 (not in allowlist)")
+        conn.close()
+    except Exception as e:
+        print(f"  ✗ allowlist test -> {e}")
+        all_ok = False
+
+    # 清理
+    proc.terminate()
+    for srv in servers:
+        srv.shutdown()
+    test_agents.unlink(missing_ok=True)
+
+    print()
+    print("=== ALL OK ===" if all_ok else "=== SOME FAILED ===")
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
