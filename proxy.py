@@ -16,7 +16,11 @@ Agent 连接示例（以 hermes 为例，配 base_url=http://wechat-route:19990/
 import json
 import logging
 import os
+import secrets
 import sys
+import threading
+import time
+import urllib.request
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -37,7 +41,11 @@ PROXY_ALLOWLIST = frozenset([
 
 
 def load_routes(agents_file=None):
-    """读 agents.json，返回 {prefix: (host, port)} 映射。"""
+    """读 agents.json，返回 (routes, meta)。
+
+    routes: {prefix: {"host": str, "port": int, "tag": str, "name": str}}
+    meta:   {ilink_base_url, ilink_token, admin_ilink_uid}
+    """
     if agents_file is None:
         agents_file = Path(__file__).parent / "agents.json"
     fp = Path(agents_file)
@@ -63,17 +71,128 @@ def load_routes(agents_file=None):
             log.warning("  Skip %s: invalid port", name)
             continue
         prefix = f"/{name}"
-        routes[prefix] = (host, port)
+        routes[prefix] = {
+            "host": host,
+            "port": port,
+            "tag": agent.get("tag", f"[{name}]"),
+            "name": name,
+        }
         log.info("  %s -> %s:%d", prefix, host, port)
 
     if not routes:
         log.error("No enabled agents found")
         sys.exit(1)
-    return routes
+
+    meta = {
+        "ilink_base_url": str(raw.get("ilink_base_url", "")).strip(),
+        "ilink_token": str(raw.get("ilink_token", "")).strip(),
+        "admin_ilink_uid": str(raw.get("admin_ilink_uid", "")).strip(),
+    }
+    return routes, meta
 
 
-def make_proxy_handler(routes):
-    """Factory: 返回绑定路由表的 ProxyHandler 类。"""
+def _ilink_send_text(base_url, token, to_user, text, timeout=10):
+    """直接通过 urllib 发送 iLink 文本消息（通知用）。"""
+    if not base_url or not token or not to_user:
+        return
+    body = json.dumps({
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": to_user,
+            "client_id": "hc-proxy-" + secrets.token_hex(8),
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": [{"type": 1, "text_item": {"text": text}}],
+        },
+        "base_info": {"channel_version": "2.1.7"},
+    }).encode("utf-8")
+    url = base_url.rstrip("/") + "/ilink/bot/sendmessage"
+    headers = {
+        "Content-Type": "application/json",
+        "AuthorizationType": "ilink_bot_token",
+        "Authorization": f"Bearer {token}",
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        log.info("iLink notification sent to %s (HTTP %d)", to_user[:16], resp.getcode())
+    except Exception as e:
+        log.warning("iLink notification failed (to=%s): %s", to_user[:16], e)
+
+
+class AgentTracker:
+    """追踪 Agent 在线状态（通过代理前缀路由心跳），状态切换时推送 iLink 通知。"""
+
+    def __init__(self, base_url, token, admin_uid, timeout=120, check_interval=30):
+        self.base_url = base_url
+        self.token = token
+        self.admin_uid = admin_uid
+        self.timeout = timeout
+        self.check_interval = check_interval
+        self._lock = threading.Lock()
+        self._agents = {}
+        log.info("AgentTracker: created (admin=%s, timeout=%ds)", (admin_uid or "none")[:16], timeout)
+
+    def record_activity(self, name, tag=""):
+        """记录 agent 心跳，状态切换时发通知。"""
+        now = time.time()
+        with self._lock:
+            prev = self._agents.get(name, {})
+            prev_state = prev.get("state", "unknown")
+            since_last = now - prev.get("last_seen", 0) if prev else 0
+            log.info("AgentTracker: heartbeat from %s (prev_state=%s, %.1fs since last)", name, prev_state, since_last)
+            self._agents[name] = {"last_seen": now, "state": "online", "tag": tag or name}
+            if prev_state == "offline":
+                self._notify_locked(name, "重新上线", now)
+            elif prev_state == "unknown":
+                self._notify_locked(name, "上线", now)
+
+    def check_timeouts(self):
+        """检查超时 agent，标记 offline 并通知。"""
+        now = time.time()
+        with self._lock:
+            log.info("AgentTracker: checking %d agents for timeouts...", len(self._agents))
+            for name, info in list(self._agents.items()):
+                if info["state"] != "online":
+                    continue
+                elapsed = now - info.get("last_seen", 0)
+                if elapsed > self.timeout:
+                    log.info("AgentTracker: %s timeout (%.0fs since last heartbeat)", name, elapsed)
+                    info["state"] = "offline"
+                    self._notify_locked(name, "掉线", now)
+
+    def _notify_locked(self, name, event, ts):
+        if not self.admin_uid or not self.token:
+            return
+        tag = self._agents.get(name, {}).get("tag", name) or name
+        ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        text = f"{tag} {event} at {ts_str}"
+        log.info("AgentTracker notification: %s", text)
+        log.info("AgentTracker: sending notification to admin_uid=%s via %s", self.admin_uid[:16], self.base_url)
+        try:
+            _ilink_send_text(self.base_url, self.token, self.admin_uid, text)
+        except Exception as e:
+            log.error("AgentTracker: send notification failed: %s", e)
+
+    def start_monitor(self):
+        """启动后台监控线程。"""
+        def _loop():
+            while True:
+                time.sleep(self.check_interval)
+                try:
+                    self.check_timeouts()
+                except Exception as e:
+                    log.error("AgentTracker monitor: %s", e)
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        log.info("AgentTracker monitor started (timeout=%ds, check=%ds)", self.timeout, self.check_interval)
+
+
+def make_proxy_handler(routes, tracker=None):
+    """Factory: 返回绑定路由表的 ProxyHandler 类。
+
+    *tracker* — 可选 AgentTracker，在 getupdates 时记录心跳。
+    """
 
     class PathRouteProxyHandler(BaseHTTPRequestHandler):
         # 避免 keep-alive 连接堆积
@@ -87,6 +206,7 @@ def make_proxy_handler(routes):
 
         def _proxy(self):
             path = urlparse(self.path).path
+            log.info("Request: %s %s", self.command, path)
 
             # 按前缀长度降序匹配，优先匹配长前缀（如 browser.hermes > hermes）
             matched = None
@@ -96,17 +216,29 @@ def make_proxy_handler(routes):
                     break
 
             if not matched:
+                log.warning("No route for path: %s", path)
                 self._write_json(404, {"ret": -1, "errmsg": "no route for this path"})
                 return
 
-            # 检查 endpoint 是否在白名单内
+            info = routes[matched]
             rest = path[len(matched) + 1:]  # 去前缀和开头的 /
+            log.info("Matched prefix=%s agent=%s rest=%s", matched, info["name"], rest or "(root)")
+
+            # 检查 endpoint 是否在白名单内
             if rest and rest not in PROXY_ALLOWLIST:
+                log.warning("Endpoint blocked: %s (agent=%s)", rest, info["name"])
                 self._write_json(404, {"ret": -1, "errmsg": "endpoint not allowed"})
-                log.warning("Proxy blocked: %s (prefix=%s)", rest, matched)
                 return
 
-            host, port = routes[matched]
+            # 记录 getupdates 心跳（agent 在线证明）
+            if rest == "ilink/bot/getupdates" and tracker:
+                tracker.record_activity(info["name"], info.get("tag", f"[{info['name']}]"))
+
+            host = info["host"]
+            # 0.0.0.0 是绑定地址，不能作为连接目标
+            if host == "0.0.0.0":
+                host = "127.0.0.1"
+            port = info["port"]
             self._forward(host, port, path[len(matched):] or "/")
 
         def _forward(self, host, port, target_path):
@@ -114,6 +246,7 @@ def make_proxy_handler(routes):
             parsed = urlparse(self.path)
             qs = ("?" + parsed.query) if parsed.query else ""
             forward_path = target_path + qs
+            log.info("Forward: %s -> %s:%d%s", self.command, host, port, forward_path)
 
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b""
@@ -130,6 +263,7 @@ def make_proxy_handler(routes):
                                                    "content-encoding")},
                 )
                 resp = conn.getresponse()
+                log.info("Backend %s:%d responded %d", host, port, resp.status)
                 # 流式写回
                 self.send_response(resp.status)
                 for k, v in resp.getheaders():
@@ -141,10 +275,10 @@ def make_proxy_handler(routes):
                     self.wfile.write(chunk)
                 conn.close()
             except ConnectionRefusedError:
-                log.error("Backend %s:%d refused connection", host, port)
+                log.error("Backend %s:%d refused connection (router gateway not ready?)", host, port)
                 self._write_json(502, {"ret": -1, "errmsg": "backend refused"})
             except Exception as e:
-                log.error("Proxy forward error: %s", e)
+                log.error("Proxy forward error to %s:%d: %s", host, port, e)
                 self._write_json(502, {"ret": -1, "errmsg": str(e)})
 
         def _write_json(self, code, obj):
@@ -173,15 +307,32 @@ def main():
     )
 
     log.info("Loading routes from %s", agents_file or "agents.json (default)")
-    routes = load_routes(agents_file or None)
+    routes, meta = load_routes(agents_file or None)
 
-    handler = make_proxy_handler(routes)
+    log.info("iLink config: base_url=%s, admin_uid=%s",
+             meta.get("ilink_base_url", "(none)"),
+             (meta.get("admin_ilink_uid") or "(none)")[:16])
+    log.info("iLink token: %s ...", (meta.get("ilink_token") or "(none)")[:16])
+
+    # Agent 在线状态追踪（需要 agents.json 中有 admin_ilink_uid）
+    tracker = None
+    if meta.get("admin_ilink_uid") and meta.get("ilink_token"):
+        tracker = AgentTracker(
+            meta["ilink_base_url"],
+            meta["ilink_token"],
+            meta["admin_ilink_uid"],
+        )
+        tracker.start_monitor()
+    else:
+        log.info("AgentTracker disabled (no admin_ilink_uid or ilink_token in agents.json)")
+
+    handler = make_proxy_handler(routes, tracker=tracker)
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
 
     log.info("=" * 50)
     log.info("wechat-route proxy listening on :%d", port)
-    for prefix, (h, p) in sorted(routes.items()):
-        log.info("  %s -> %s:%d", prefix, h, p)
+    for prefix, info in sorted(routes.items()):
+        log.info("  %s -> %s:%d  (%s)", prefix, info["host"], info["port"], info.get("tag", ""))
     log.info("=" * 50)
 
     try:

@@ -5,7 +5,7 @@
   "default_route": "hermes",
   "groups": {
     "all": {
-      "members": ["hermes", "openclaw"],
+      "members": ["hermes", "openclaw","helix","browser.hermes"],
       "aliases": ["both", "all", "@all"]
     }
   },
