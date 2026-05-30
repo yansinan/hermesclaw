@@ -570,7 +570,7 @@ def route_label(route_spec, registry=None):
 def _status_text(state, uid, registry):
     current = state.get(uid, default_route=registry.default_route)
     lines = [
-        "**wechat-route** by X @AaronYonW",
+        "**wechat-route**: 路由器状态",
         f"**Current route**: **{route_label(current, registry)}**",
     ]
     for name in registry.enabled_names:
